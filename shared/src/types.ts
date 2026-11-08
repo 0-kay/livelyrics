@@ -52,6 +52,11 @@ export interface IdentifyResponse {
   processingMs: number;
   /** True when lyrics came from the cache. */
   lyricsCached: boolean;
+  /**
+   * Factor already applied to lyric timestamps because the matched track and
+   * the lyrics source differ in duration (slowed or sped versions). 1 means unscaled.
+   */
+  lyricsTimeScale: number;
 }
 
 export interface HealthResponse {

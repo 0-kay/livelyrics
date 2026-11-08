@@ -24,3 +24,10 @@ button:disabled { opacity: 0.6; cursor: default; }
 .line { font-size: 1.4rem; line-height: 1.5; padding: 6px 0; color: var(--muted); transition: color 0.2s, transform 0.2s; }
 .line.past { opacity: 0.55; }
 .line.active { color: var(--fg); font-weight: 700; transform: scale(1.02); transform-origin: left center; }
+.sync { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 0.9rem; color: var(--muted); }
+.sync .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
+.sync-confirming .dot { background: #f5c26b; }
+.sync-locked .dot { background: #6bd68f; }
+.sync-drifting .dot { background: #f08a5d; }
+.sync-searching .dot { animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: 0.3; } }

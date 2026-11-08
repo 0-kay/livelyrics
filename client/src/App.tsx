@@ -1,69 +1,72 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { IdentifyResponse } from '@livelyrics/shared';
+import type { SyncState } from '@livelyrics/shared';
 import { health, identify } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
-import { FixedClock } from './lyrics/fixedClock.js';
 import { LyricsPlayer } from './lyrics/LyricsPlayer.js';
-
-type Status = 'idle' | 'listening' | 'identifying' | 'playing' | 'no-match' | 'error';
+import { SyncSession, type SyncSnapshot } from './sync/syncSession.js';
 
 const CLIP_SECONDS = 9;
 
+const STATE_LABEL: Record<SyncState, string> = {
+  searching: 'Listening',
+  confirming: 'Syncing',
+  locked: 'Locked',
+  drifting: 'Adjusting',
+};
+
 export function App() {
   const recorder = useRef(new MicRecorder({ bufferSeconds: 10 }));
-  const [status, setStatus] = useState<Status>('idle');
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<IdentifyResponse | null>(null);
-  const [clock, setClock] = useState<FixedClock | null>(null);
+  const session = useRef<SyncSession | null>(null);
+  const [snap, setSnap] = useState<SyncSnapshot | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
   const [mode, setMode] = useState<string>('');
   const [buffered, setBuffered] = useState(0);
 
   useEffect(() => {
     health().then((h) => setMode(h.mode)).catch(() => setMode('offline'));
     const rec = recorder.current;
-    return () => void rec.stop();
+    return () => {
+      session.current?.stop();
+      void rec.stop();
+    };
   }, []);
 
+  // Show buffer progress until the first clip is ready.
+  useEffect(() => {
+    if (!snap?.running || snap.recognitions > 0) return;
+    const id = setInterval(() => setBuffered(recorder.current.bufferedSeconds()), 200);
+    return () => clearInterval(id);
+  }, [snap?.running, snap?.recognitions]);
+
   const listen = useCallback(async () => {
-    setError(null);
-    setResult(null);
-    setClock(null);
+    setStartError(null);
     try {
       const rec = recorder.current;
       await rec.start();
-      setStatus('listening');
-      while (rec.bufferedSeconds() < CLIP_SECONDS) {
-        setBuffered(rec.bufferedSeconds());
-        await new Promise((r) => setTimeout(r, 200));
-      }
-      const clip = rec.getClip(CLIP_SECONDS);
-      if (!clip) throw new Error('Not enough audio captured');
-      setStatus('identifying');
-      const res = await identify(clip.blob);
-      await rec.stop();
-      setResult(res);
-      if (!res.match) {
-        setStatus('no-match');
-        return;
-      }
-      // playOffsetMs refers to the end of the clip, captured at clip.capturedAtMs.
-      setClock(new FixedClock(res.match.playOffsetMs, clip.capturedAtMs));
-      setStatus('playing');
+      const s = new SyncSession({
+        getClip: () => rec.getClip(CLIP_SECONDS),
+        identify: (blob) => identify(blob),
+        onChange: setSnap,
+      });
+      session.current = s;
+      s.start();
     } catch (e) {
       await recorder.current.stop();
-      setError(e instanceof Error ? e.message : String(e));
-      setStatus('error');
+      setStartError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
   const stop = useCallback(async () => {
+    session.current?.stop();
+    session.current = null;
     await recorder.current.stop();
-    setClock(null);
-    setStatus('idle');
+    setSnap(null);
   }, []);
 
-  const getPositionMs = useCallback(() => (clock ? clock.positionAt(performance.now()) : 0), [clock]);
-  const busy = status === 'listening' || status === 'identifying';
+  const getPositionMs = useCallback(() => session.current?.positionMs() ?? 0, []);
+  const running = Boolean(snap?.running);
+  const track = snap?.track ?? null;
+  const lyrics = snap?.lyrics ?? null;
 
   return (
     <main className="app">
@@ -73,24 +76,33 @@ export function App() {
       </header>
 
       <section className="controls">
-        <button onClick={status === 'playing' ? stop : listen} disabled={busy}>
-          {status === 'playing' ? 'Stop' : busy ? 'Listening...' : 'Listen'}
-        </button>
+        <button onClick={running ? stop : listen}>{running ? 'Stop' : 'Listen'}</button>
         <p className="status" role="status">
-          {status === 'idle' && 'Tap Listen and hold your device near the music.'}
-          {status === 'listening' && `Listening ${buffered.toFixed(0)}s of ${CLIP_SECONDS}s`}
-          {status === 'identifying' && 'Identifying the song'}
-          {status === 'no-match' && 'No match found. Try again closer to the speaker.'}
-          {status === 'error' && `Something went wrong: ${error}`}
-          {status === 'playing' && result?.match && `${result.match.title} by ${result.match.artist}`}
+          {!running && !startError && 'Tap Listen and hold your device near the music.'}
+          {startError && `Could not start the mic: ${startError}`}
+          {running && !track && snap?.recognitions === 0 && `Listening ${buffered.toFixed(0)}s of ${CLIP_SECONDS}s`}
+          {running && !track && (snap?.recognitions ?? 0) > 0 && 'No match yet. Keep the device near the speaker.'}
+          {running && track && `${track.title} by ${track.artist}`}
         </p>
+        {running && snap && (
+          <p
+            className={`sync sync-${snap.state}`}
+            aria-live="polite"
+            data-action={snap.lastAction ?? ''}
+            data-error-ms={Math.round(snap.lastErrorMs)}
+            data-recognitions={snap.recognitions}
+          >
+            <span className="dot" aria-hidden="true" />
+            {STATE_LABEL[snap.state]}
+            {track && ` · ${snap.rate.toFixed(2)}x`}
+            {snap.error && ` · retrying (${snap.error})`}
+          </p>
+        )}
       </section>
 
-      {status === 'playing' && result?.lyrics && !result.lyrics.instrumental && (
-        <LyricsPlayer lines={result.lyrics.lines} getPositionMs={getPositionMs} />
-      )}
-      {status === 'playing' && result?.lyrics?.instrumental && <p className="note">This track is instrumental.</p>}
-      {status === 'playing' && !result?.lyrics && <p className="note">No synced lyrics found for this track.</p>}
+      {track && lyrics && !lyrics.instrumental && <LyricsPlayer lines={lyrics.lines} getPositionMs={getPositionMs} />}
+      {track && lyrics?.instrumental && <p className="note">This track is instrumental.</p>}
+      {track && !lyrics && <p className="note">No synced lyrics found for this track.</p>}
     </main>
   );
 }

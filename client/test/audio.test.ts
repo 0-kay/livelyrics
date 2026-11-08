@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FloatRingBuffer } from '../src/audio/ringBuffer.js';
 import { downsample, encodeWav } from '../src/audio/wav.js';
-import { FixedClock } from '../src/lyrics/fixedClock.js';
 import { formatMs } from '../src/lyrics/LyricsPlayer.js';
 
 const f = (...xs: number[]) => Float32Array.from(xs);
@@ -58,13 +57,7 @@ describe('encodeWav', () => {
   });
 });
 
-describe('FixedClock', () => {
-  it('advances at 1x from the anchor', () => {
-    const c = new FixedClock(30_000, 1_000);
-    expect(c.positionAt(1_000)).toBe(30_000);
-    expect(c.positionAt(3_500)).toBe(32_500);
-  });
-
+describe('LyricsPlayer helpers', () => {
   it('formats positions', () => {
     expect(formatMs(65_400)).toBe('1:05');
     expect(formatMs(-5)).toBe('0:00');

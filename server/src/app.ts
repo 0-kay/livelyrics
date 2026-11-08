@@ -1,6 +1,17 @@
 import multipart from '@fastify/multipart';
+import fastifyStatic from '@fastify/static';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { HealthResponse, IdentifyResponse, ProviderMode, SyncedLyrics, TrackMatch } from '@livelyrics/shared';
+import {
+  durationScale,
+  scaleLyrics,
+  type HealthResponse,
+  type IdentifyResponse,
+  type ProviderMode,
+  type SyncedLyrics,
+  type TrackMatch,
+} from '@livelyrics/shared';
 import { MemoryLruCache, type Cache } from './cache.js';
 import type { Providers } from './providers/index.js';
 
@@ -11,6 +22,8 @@ export interface AppDeps {
   lyricsCache?: Cache<SyncedLyrics | null>;
   maxUploadBytes?: number;
   logger?: boolean;
+  /** Serve a built client (index.html plus assets) from this directory. */
+  staticDir?: string;
 }
 
 const ALLOWED_MIME = /^(audio\/(wav|x-wav|wave|webm|ogg|mp4|mpeg|aac|x-m4a)|video\/webm)(;.*)?$/i;
@@ -82,9 +95,30 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       }
     }
 
-    const body: IdentifyResponse = { match, lyrics, lyricsCached, processingMs: Date.now() - started };
+    // The cache keeps unscaled lyrics; scale per response to the matched track's timeline.
+    const lyricsTimeScale = match && lyrics ? durationScale(match.durationMs, lyrics.durationMs) : 1;
+    if (lyrics) lyrics = scaleLyrics(lyrics, lyricsTimeScale);
+
+    const body: IdentifyResponse = {
+      match,
+      lyrics,
+      lyricsCached,
+      lyricsTimeScale,
+      processingMs: Date.now() - started,
+    };
     return body;
   });
+
+  if (deps.staticDir) {
+    const root = resolve(deps.staticDir);
+    if (!existsSync(resolve(root, 'index.html'))) throw new Error(`STATIC_DIR has no index.html: ${root}`);
+    await app.register(fastifyStatic, { root, wildcard: false });
+    // Single page app: unknown non-API GETs get index.html.
+    app.setNotFoundHandler((req, reply) => {
+      if (req.method === 'GET' && !req.url.startsWith('/api/')) return reply.sendFile('index.html');
+      return reply.code(404).send({ error: 'Not found' });
+    });
+  }
 
   return app;
 }

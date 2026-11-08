@@ -34,7 +34,10 @@ describe('API', () => {
   });
 
   it('is deterministic for identical audio', async () => {
-    const { app } = await mockApp();
+    const app = await buildApp({
+      mode: 'mock',
+      providers: { recognition: new MockRecognitionProvider(), lyrics: new MockLyricsProvider(), transcription: null },
+    });
     const req = () => app.inject({ method: 'POST', url: '/api/identify', ...multipartBody('audio', 'a.webm', 'audio/webm;codecs=opus', audio) });
     const [a, b] = [(await req()).json(), (await req()).json()];
     expect(a.match).toEqual(b.match);

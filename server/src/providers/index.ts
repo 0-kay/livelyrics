@@ -22,7 +22,9 @@ export class MissingConfigError extends Error {
 export function createProviders(config: AppConfig): Providers {
   if (config.mode === 'mock') {
     return {
-      recognition: new MockRecognitionProvider(),
+      recognition: new MockRecognitionProvider({
+        virtualPlayback: { startedAtMs: Date.now(), rate: config.mockPlaybackRate },
+      }),
       lyrics: new MockLyricsProvider(),
       transcription: new MockTranscriptionProvider(),
     };

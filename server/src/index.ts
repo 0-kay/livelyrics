@@ -8,7 +8,13 @@ async function main() {
     console.warn('CACHE_BACKEND=redis is not implemented yet; using the in-memory cache.');
   }
   const providers = createProviders(config);
-  const app = await buildApp({ mode: config.mode, providers, maxUploadBytes: config.maxUploadBytes, logger: true });
+  const app = await buildApp({
+    mode: config.mode,
+    providers,
+    maxUploadBytes: config.maxUploadBytes,
+    logger: true,
+    staticDir: config.staticDir,
+  });
   await app.listen({ port: config.port, host: '0.0.0.0' });
 }
 

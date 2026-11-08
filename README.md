@@ -5,9 +5,9 @@ Listens to music through the mic, identifies the song, and shows synced lyrics w
 ## Layout
 
 ```
-shared/   Types, provider interfaces, LRC parser, line search (used by both sides)
-server/   Fastify API: /api/health, /api/identify (recognition + lyrics + cache)
-client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), lyrics player
+shared/   Types, provider interfaces, LRC parser, line search, adaptive clock (used by both sides)
+server/   Fastify API: /api/health, /api/identify (recognition + lyrics + cache + duration scaling)
+client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), re-recognition loop, lyrics player
 ```
 
 ## Requirements
@@ -23,6 +23,8 @@ npm run dev:client      # App on http://localhost:5173, proxies /api to the serv
 ```
 
 Open the app, tap **Listen**, and allow mic access. In mock mode any clip of 1 KB or more matches the built-in fixture song "Paper Lanterns" (invented placeholder text, not a real song), so you can try the full flow without keys. Mic access needs `localhost` or HTTPS.
+
+The mock pretends the fixture song has been playing on a loop since the server started. Set `MOCK_PLAYBACK_RATE` (for example `MOCK_PLAYBACK_RATE=1.25 npm run dev:server`) to watch the app detect a sped up or slowed down track.
 
 ## Real providers
 
@@ -51,9 +53,28 @@ Real providers are tested against a fake `fetch`, so the suite never touches the
 - `GET /api/health` returns `{ ok, mode }`.
 - `POST /api/identify` takes multipart form data with an `audio` file (WAV, webm, ogg, mp4, mpeg; 5 MB max) and returns `{ match, lyrics, lyricsCached, processingMs }`. `match.playOffsetMs` is the song position at the end of the clip. `match` is `null` when nothing was recognized.
 
+`lyricsTimeScale` is the factor already applied to the lyric timestamps when the matched track and the lyrics source differ in duration by more than 3% (slowed or sped versions). It is 1 when no scaling was needed.
+
 Lyrics are cached in memory (LRU, 24h for hits, 1h for misses). `CACHE_BACKEND=redis` is reserved for later and currently falls back to memory.
+
+## How syncing works
+
+All of this lives in `shared/src/clock/` and every tuning constant is in `shared/src/clock/config.ts`.
+
+1. Each recognition result becomes a sample `(wallMs, songPosMs)`, placed at the moment the clip's last audio sample was captured. This removes upload, processing and network time from the estimate.
+2. The clock follows `songPositionMs = anchorOffsetMs + (now - anchorWallMs) * rate + latencyCompMs`.
+3. `rate` is the slope of a rolling linear regression over the last 16 samples, with outliers (over 900ms off the line) dropped, clamped to 0.7x to 1.4x and smoothed with an EMA.
+4. Drift handling: a sample within 350ms agrees; up to 1500ms off is nudged out gradually (the shown position never jumps or runs backwards); more than 1500ms is held as a suspect and only snaps when the next sample confirms it, so one bad result cannot throw the lyrics off.
+5. Scheduling: recognize every 2s while searching, lock on after 3 agreeing samples once the rate estimate covers 20s, then re-check every 20 to 30s. A nudge or suspect while locked goes back to fast checks; 3 misses in a row drop the song.
+
+The synthetic harness in `shared/test/harness.ts` simulates playback at 0.8x, 0.9x, 1.0x, 1.1x and 1.25x with jitter, outliers, misses, variable latency, seeks and mid-song speed changes.
+
+## Docker and Cloud Run
+
+`docker build -t livelyrics . && docker run --rm -p 8080:8080 livelyrics` runs the API and the built client in one container (mock mode by default). See `DEPLOY.md` for Cloud Run notes. Nothing is deployed automatically.
 
 ## Current limitations
 
-- The player runs on a fixed 1x clock from one recognition result. The adaptive clock (latency compensation, rate estimation, drift handling) is Milestone 2.
+- `latencyCompMs` defaults to 0. Bluetooth speakers or a far away PA may need a positive value; there is no UI for it yet.
+- Rate estimation assumes the recognition provider reports offsets on the original track timeline. Concert mode (Milestone 3) handles live performances.
 - LRCLIB is for personal use. A public product would need a licensed lyrics provider.

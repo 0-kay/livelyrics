@@ -9,6 +9,10 @@ export interface AppConfig {
   openaiApiKey?: string;
   /** Max upload size for audio clips in bytes. */
   maxUploadBytes: number;
+  /** Mock mode only: playback rate of the virtual fixture song (try 0.8 or 1.25). */
+  mockPlaybackRate: number;
+  /** Serve the built client from this directory when set (production container). */
+  staticDir?: string;
 }
 
 const empty = (v: string | undefined) => (v && v.trim() ? v.trim() : undefined);
@@ -34,5 +38,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     lrclibUserAgent: empty(env.LRCLIB_USER_AGENT) ?? 'livelyrics/0.1 (https://github.com/0-kay/livelyrics)',
     openaiApiKey: empty(env.OPENAI_API_KEY),
     maxUploadBytes: 5 * 1024 * 1024,
+    mockPlaybackRate: parseRate(env.MOCK_PLAYBACK_RATE),
+    staticDir: empty(env.STATIC_DIR),
   };
+}
+
+function parseRate(v: string | undefined): number {
+  if (!v || !v.trim()) return 1;
+  const r = Number(v);
+  if (!Number.isFinite(r) || r < 0.5 || r > 2) {
+    throw new Error(`MOCK_PLAYBACK_RATE must be a number between 0.5 and 2, got "${v}"`);
+  }
+  return r;
 }
