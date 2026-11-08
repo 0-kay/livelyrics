@@ -62,4 +62,25 @@ export interface IdentifyResponse {
 export interface HealthResponse {
   ok: true;
   mode: ProviderMode;
+  /** Concert mode feature flag: POST /api/transcribe is available. */
+  concertMode: boolean;
+}
+
+/** Best lyric line match for a transcript (see matchTranscript). */
+export interface TranscriptLineMatch {
+  lineIndex: number;
+  startMs: number;
+  positionMs: number;
+  score: number;
+  ambiguous: boolean;
+  confident: boolean;
+  text: string;
+}
+
+/** Response body of POST /api/transcribe. */
+export interface TranscribeResponse {
+  text: string;
+  /** Best match against the track's lyrics, or null without lyrics or a usable transcript. */
+  match: TranscriptLineMatch | null;
+  processingMs: number;
 }

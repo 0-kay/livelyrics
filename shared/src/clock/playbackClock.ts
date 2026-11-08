@@ -169,6 +169,22 @@ export class AdaptivePlaybackClock {
   }
 
   /**
+   * Force the clock onto an externally verified position (concert mode
+   * lyric match). Keeps the current rate, drops older samples that disagree,
+   * and jumps without easing. Before the first sample this behaves like addSample.
+   */
+  reanchor(sample: ClockSample, nowMs: number): ClockUpdate {
+    if (!this.anchored) return this.addSample(sample, nowMs);
+    const errorMs = sample.songPosMs - this.targetAt(sample.wallMs);
+    this.pendingSnap = null;
+    this.estimator.reset({ keepRate: true });
+    this.estimator.add(sample);
+    this.setTarget(sample.songPosMs, sample.wallMs, this.currentRate);
+    this.clearResidual();
+    return { action: 'snap', errorMs, rate: this.currentRate, rateSpanMs: this.estimator.spanMs };
+  }
+
+  /**
    * True if b is physically consistent with a: the song advanced between them
    * at some rate inside [minRate, maxRate], give or take sample noise.
    */

@@ -13,6 +13,8 @@ export interface AppConfig {
   mockPlaybackRate: number;
   /** Serve the built client from this directory when set (production container). */
   staticDir?: string;
+  /** Concert mode feature flag (experimental). Enables POST /api/transcribe. */
+  concertMode: boolean;
 }
 
 const empty = (v: string | undefined) => (v && v.trim() ? v.trim() : undefined);
@@ -40,6 +42,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxUploadBytes: 5 * 1024 * 1024,
     mockPlaybackRate: parseRate(env.MOCK_PLAYBACK_RATE),
     staticDir: empty(env.STATIC_DIR),
+    concertMode: parseFlag(env.CONCERT_MODE, 'CONCERT_MODE'),
   };
 }
 
@@ -50,4 +53,11 @@ function parseRate(v: string | undefined): number {
     throw new Error(`MOCK_PLAYBACK_RATE must be a number between 0.5 and 2, got "${v}"`);
   }
   return r;
+}
+
+function parseFlag(v: string | undefined, name: string): boolean {
+  const s = (v ?? '').trim().toLowerCase();
+  if (s === '' || s === '0' || s === 'false' || s === 'off') return false;
+  if (s === '1' || s === 'true' || s === 'on') return true;
+  throw new Error(`${name} must be on or off, got "${v}"`);
 }

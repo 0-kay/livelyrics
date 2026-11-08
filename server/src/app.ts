@@ -5,6 +5,9 @@ import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
   durationScale,
+  matchTranscript,
+  type LyricsQuery,
+  type TranscribeResponse,
   scaleLyrics,
   type HealthResponse,
   type IdentifyResponse,
@@ -24,6 +27,8 @@ export interface AppDeps {
   logger?: boolean;
   /** Serve a built client (index.html plus assets) from this directory. */
   staticDir?: string;
+  /** Concert mode feature flag. POST /api/transcribe exists only when on and a transcription provider is set. */
+  concertMode?: boolean;
 }
 
 const ALLOWED_MIME = /^(audio\/(wav|x-wav|wave|webm|ogg|mp4|mpeg|aac|x-m4a)|video\/webm)(;.*)?$/i;
@@ -39,9 +44,31 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const lyricsCache = deps.lyricsCache ?? new MemoryLruCache<SyncedLyrics | null>();
   const app = Fastify({ logger: deps.logger ?? false });
 
-  await app.register(multipart, { limits: { fileSize: maxUploadBytes, files: 1, fields: 5 } });
+  const concertMode = Boolean(deps.concertMode && deps.providers.transcription);
+  await app.register(multipart, { limits: { fileSize: maxUploadBytes, files: 1, fields: 10, fieldSize: 1024 } });
 
-  app.get('/api/health', async (): Promise<HealthResponse> => ({ ok: true, mode: deps.mode }));
+  app.get('/api/health', async (): Promise<HealthResponse> => ({ ok: true, mode: deps.mode, concertMode }));
+
+  /** Cached lyrics lookup. Returns unscaled lyrics plus whether they came from the cache. */
+  async function lookupLyrics(q: LyricsQuery & { durationMs: number }, log: FastifyInstance['log']) {
+    const key = lyricsCacheKey(q);
+    const cached = await lyricsCache.get(key);
+    if (cached !== undefined) return { lyrics: cached, cached: true };
+    try {
+      const lyrics = await deps.providers.lyrics.getSynced({
+        title: q.title,
+        artist: q.artist,
+        album: q.album,
+        durationMs: q.durationMs || undefined,
+      });
+      // Cache misses for a shorter time so newly added lyrics show up.
+      await lyricsCache.set(key, lyrics, lyrics ? undefined : 60 * 60 * 1000);
+      return { lyrics, cached: false };
+    } catch (err) {
+      log.warn({ err }, 'lyrics lookup failed');
+      return { lyrics: null, cached: false };
+    }
+  }
 
   app.post('/api/identify', async (req, reply) => {
     const started = Date.now();
@@ -73,26 +100,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     let lyrics: SyncedLyrics | null = null;
     let lyricsCached = false;
     if (match) {
-      const key = lyricsCacheKey(match);
-      const cached = await lyricsCache.get(key);
-      if (cached !== undefined) {
-        lyrics = cached;
-        lyricsCached = true;
-      } else {
-        try {
-          lyrics = await deps.providers.lyrics.getSynced({
-            title: match.title,
-            artist: match.artist,
-            album: match.album,
-            durationMs: match.durationMs || undefined,
-          });
-          // Cache misses for a shorter time so newly added lyrics show up.
-          await lyricsCache.set(key, lyrics, lyrics ? undefined : 60 * 60 * 1000);
-        } catch (err) {
-          req.log.warn({ err }, 'lyrics lookup failed');
-          lyrics = null;
-        }
-      }
+      const r = await lookupLyrics(match, req.log);
+      lyrics = r.lyrics;
+      lyricsCached = r.cached;
     }
 
     // The cache keeps unscaled lyrics; scale per response to the matched track's timeline.
@@ -108,6 +118,63 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     };
     return body;
   });
+
+  if (concertMode) {
+    const transcription = deps.providers.transcription!;
+    app.post('/api/transcribe', async (req, reply) => {
+      const started = Date.now();
+      if (!req.isMultipart()) return reply.code(415).send({ error: 'Expected multipart/form-data with an "audio" file' });
+
+      const fields: Record<string, string> = {};
+      let audio: Buffer | null = null;
+      let mime = '';
+      try {
+        for await (const part of req.parts()) {
+          if (part.type === 'field') {
+            fields[part.fieldname] = String(part.value);
+          } else if (part.fieldname === 'audio') {
+            mime = part.mimetype;
+            if (!ALLOWED_MIME.test(mime)) return reply.code(415).send({ error: `Unsupported audio type: ${mime}` });
+            audio = await part.toBuffer();
+          } else {
+            await part.toBuffer();
+          }
+        }
+      } catch {
+        return reply.code(413).send({ error: `Audio exceeds ${maxUploadBytes} bytes` });
+      }
+      if (!audio) return reply.code(400).send({ error: 'Missing "audio" file field' });
+      if (audio.length === 0) return reply.code(400).send({ error: 'Empty audio file' });
+
+      const num = (v: string | undefined) => (v !== undefined && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined);
+      const durationMs = num(fields.durationMs);
+      const positionMs = num(fields.positionMs);
+      if (fields.durationMs !== undefined && durationMs === undefined) return reply.code(400).send({ error: 'durationMs must be a number' });
+      if (fields.positionMs !== undefined && positionMs === undefined) return reply.code(400).send({ error: 'positionMs must be a number' });
+
+      let text: string;
+      try {
+        text = await transcription.transcribe(audio, mime);
+      } catch (err) {
+        req.log.error({ err }, 'transcription failed');
+        return reply.code(502).send({ error: 'Transcription provider failed' });
+      }
+
+      let match: TranscribeResponse['match'] = null;
+      const title = fields.title?.trim();
+      const artist = fields.artist?.trim();
+      if (text && title && artist) {
+        const { lyrics } = await lookupLyrics({ title, artist, album: fields.album?.trim() || undefined, durationMs: durationMs ?? 0 }, req.log);
+        if (lyrics && !lyrics.instrumental) {
+          // Match against the same timeline /api/identify returned to the client.
+          const scaled = durationMs ? scaleLyrics(lyrics, durationScale(durationMs, lyrics.durationMs)) : lyrics;
+          match = matchTranscript(text, scaled.lines, { aroundMs: positionMs ?? null });
+        }
+      }
+      const body: TranscribeResponse = { text, match, processingMs: Date.now() - started };
+      return body;
+    });
+  }
 
   if (deps.staticDir) {
     const root = resolve(deps.staticDir);

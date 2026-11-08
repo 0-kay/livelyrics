@@ -60,5 +60,39 @@ export const SCALING_CONFIG = {
   maxScale: CLOCK_CONFIG.maxRate,
 } as const;
 
-export type ClockConfig = { -readonly [K in keyof typeof CLOCK_CONFIG]: number };
+/**
+ * Concert mode (experimental): match transcribed sung words against lyric
+ * lines near the current position and re-anchor the clock on confident
+ * matches only. Off unless the feature flag is enabled.
+ */
+export const CONCERT_CONFIG = {
+  /** Length of each transcribed audio chunk (seconds). */
+  chunkSeconds: 5,
+  /** Delay between transcription attempts (ms). */
+  intervalMs: 5_000,
+  /** Search lyric lines this far before and after the current position (ms). */
+  windowBeforeMs: 30_000,
+  windowAfterMs: 45_000,
+  /** Transcripts with fewer normalized words than this are ignored. */
+  minWords: 3,
+  /** Fuzzy score (0-1) a candidate needs to count as a confident match. */
+  minScore: 0.72,
+  /**
+   * The best candidate must beat the best candidate with different text at a
+   * different place by this much (0-1), otherwise the match is ambiguous.
+   */
+  minMargin: 0.08,
+  /** Re-anchor only when the match disagrees with the clock by more than this (ms). */
+  minCorrectionMs: 2_500,
+  /** Corrections larger than this need two consecutive consistent matches (ms). */
+  confirmLargeJumpMs: 15_000,
+  /** Two matches confirm each other when their implied positions agree within this (ms). */
+  confirmToleranceMs: 3_000,
+  /** Assumed duration of the last lyric line when the next start is unknown (ms). */
+  lastLineDurationMs: 4_000,
+} as const;
+
+export type ConcertConfig = { -readonly [K in keyof typeof CONCERT_CONFIG]: number };
+
+export type ClockConfig ={ -readonly [K in keyof typeof CLOCK_CONFIG]: number };
 export type SchedulerConfig = { -readonly [K in keyof typeof SCHEDULER_CONFIG]: number };

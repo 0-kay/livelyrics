@@ -14,7 +14,11 @@ async function main() {
     maxUploadBytes: config.maxUploadBytes,
     logger: true,
     staticDir: config.staticDir,
+    concertMode: config.concertMode,
   });
+  if (config.concertMode && !providers.transcription) {
+    console.warn('CONCERT_MODE=on but no transcription provider is configured (set OPENAI_API_KEY); concert mode is off.');
+  }
   await app.listen({ port: config.port, host: '0.0.0.0' });
 }
 

@@ -21,12 +21,12 @@ export class MissingConfigError extends Error {
 
 export function createProviders(config: AppConfig): Providers {
   if (config.mode === 'mock') {
+    // Recognition and transcription mocks follow the same virtual song so they agree.
+    const virtualPlayback = { startedAtMs: Date.now(), rate: config.mockPlaybackRate };
     return {
-      recognition: new MockRecognitionProvider({
-        virtualPlayback: { startedAtMs: Date.now(), rate: config.mockPlaybackRate },
-      }),
+      recognition: new MockRecognitionProvider({ virtualPlayback }),
       lyrics: new MockLyricsProvider(),
-      transcription: new MockTranscriptionProvider(),
+      transcription: new MockTranscriptionProvider({ virtualPlayback }),
     };
   }
   const { host, accessKey, accessSecret } = config.acrcloud;

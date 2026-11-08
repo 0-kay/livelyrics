@@ -18,7 +18,7 @@ describe('API', () => {
     const { app } = await mockApp();
     const res = await app.inject({ method: 'GET', url: '/api/health' });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, mode: 'mock' });
+    expect(res.json()).toEqual({ ok: true, mode: 'mock', concertMode: false });
   });
 
   it('POST /api/identify returns match plus lyrics in mock mode', async () => {
