@@ -1,0 +1,17 @@
+{
+  "name": "livelyrics",
+  "private": true,
+  "type": "module",
+  "workspaces": ["shared", "server", "client"],
+  "scripts": {
+    "build": "npm run build -w shared && npm run build -w server && npm run build -w client",
+    "dev:server": "npm run build -w shared && npm run dev -w server",
+    "dev:client": "npm run dev -w client",
+    "test": "vitest run",
+    "typecheck": "npm run typecheck --workspaces"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^5.1.0"
+  }
+}

@@ -8,14 +8,14 @@
 5. If blocked (missing key, unclear decision), write the blocker under "Blockers" and stop. Do not guess at secrets or create accounts.
 
 ## Milestone 1: Scaffold and recognition
-- [ ] Monorepo layout: `/server`, `/client`, shared types
-- [ ] Provider interfaces plus Mock and Real implementations (ACRCloud, LRCLIB, Whisper)
-- [ ] `PROVIDER_MODE` switch, zero-key mock mode works
-- [ ] Mic capture in client (rolling 8-10s buffer, WAV or webm upload)
-- [ ] `POST /api/identify` plus lyrics lookup plus cache
-- [ ] LRC parser with tests (edge cases: multiple timestamps, offsets, empty lines)
-- [ ] Highlighted-line player on a fixed clock
-- [ ] Tests green, README with run instructions
+- [x] Monorepo layout: `/server`, `/client`, shared types
+- [x] Provider interfaces plus Mock and Real implementations (ACRCloud, LRCLIB, Whisper)
+- [x] `PROVIDER_MODE` switch, zero-key mock mode works
+- [x] Mic capture in client (rolling 8-10s buffer, WAV or webm upload)
+- [x] `POST /api/identify` plus lyrics lookup plus cache
+- [x] LRC parser with tests (edge cases: multiple timestamps, offsets, empty lines)
+- [x] Highlighted-line player on a fixed clock
+- [x] Tests green, README with run instructions
 
 ## Milestone 2: Adaptive clock
 - [ ] Playback clock module with latency compensation
@@ -39,3 +39,5 @@
 
 ## Run log
 (append one short entry per run: date, what was done, test status)
+
+- 2026-11-08: Milestone 1 complete. npm workspaces (shared, server, client); provider interfaces with Mock plus ACRCloud, LRCLIB and Whisper implementations; PROVIDER_MODE switch (mock by default, real lists missing keys); AudioWorklet mic capture into a 10s ring buffer uploaded as 16 kHz WAV; POST /api/identify with in-memory LRU lyrics cache; LRC parser covering multiple timestamps, offsets, empty lines, enhanced tags; fixed-clock highlighted player; README. Tests: 41 passed (Vitest), typecheck clean, build OK, mock-mode browser smoke test with a fake mic passed. Note: Redis cache backend is stubbed (falls back to memory) until needed.
