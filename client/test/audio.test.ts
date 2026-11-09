@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FloatRingBuffer } from '../src/audio/ringBuffer.js';
+import { SilenceGapDetector } from '../src/audio/silence.js';
+import { clipSecondsFromSearch } from '../src/config.js';
 import { downsample, encodeWav } from '../src/audio/wav.js';
 import { formatMs } from '../src/lyrics/LyricsPlayer.js';
 
@@ -18,6 +20,14 @@ describe('FloatRingBuffer', () => {
     expect([...r.snapshot()]).toEqual([8, 9, 10, 11]);
     r.clear();
     expect(r.length).toBe(0);
+  });
+
+  it('snapshotLast returns only the most recent samples, in order', () => {
+    const r = new FloatRingBuffer(5);
+    r.push(f(1, 2, 3, 4, 5, 6, 7));
+    expect([...r.snapshotLast(3)]).toEqual([5, 6, 7]);
+    expect([...r.snapshotLast(99)]).toEqual([3, 4, 5, 6, 7]);
+    expect([...r.snapshotLast(0)]).toEqual([]);
   });
 
   it('rejects bad capacity', () => {
@@ -61,5 +71,56 @@ describe('LyricsPlayer helpers', () => {
   it('formats positions', () => {
     expect(formatMs(65_400)).toBe('1:05');
     expect(formatMs(-5)).toBe('0:00');
+  });
+});
+
+describe('SilenceGapDetector', () => {
+  const loud = new Float32Array(128).fill(0.2);
+  const quiet = new Float32Array(128).fill(0.0001);
+  /** Feed frames of 2.7ms each for the given duration; returns true if any push fired. */
+  const feed = (d: SilenceGapDetector, frame: Float32Array, startMs: number, durMs: number) => {
+    let fired = false;
+    for (let t = startMs; t < startMs + durMs; t += 2.7) fired = d.push(frame, t) || fired;
+    return fired;
+  };
+
+  it('fires once when sound returns after a long enough gap', () => {
+    const d = new SilenceGapDetector();
+    expect(feed(d, loud, 0, 5_000)).toBe(false);
+    expect(feed(d, quiet, 5_000, 2_000)).toBe(false);
+    expect(d.push(loud, 7_001)).toBe(true);
+    expect(d.push(loud, 7_004)).toBe(false);
+  });
+
+  it('ignores short dips and steady sound', () => {
+    const d = new SilenceGapDetector();
+    feed(d, loud, 0, 5_000);
+    feed(d, quiet, 5_000, 600);
+    expect(d.push(loud, 5_601)).toBe(false);
+    expect(feed(d, loud, 5_700, 10_000)).toBe(false);
+  });
+
+  it('does not fire while the gap is still going', () => {
+    const d = new SilenceGapDetector();
+    feed(d, loud, 0, 5_000);
+    expect(feed(d, quiet, 5_000, 10_000)).toBe(false);
+  });
+
+  it('still sees a gap when the room noise floor is above the absolute floor', () => {
+    const d = new SilenceGapDetector();
+    const noise = new Float32Array(128).fill(0.01);
+    feed(d, loud, 0, 8_000);
+    expect(feed(d, noise, 8_000, 2_000)).toBe(false);
+    expect(d.push(loud, 10_001)).toBe(true);
+  });
+});
+
+describe('clipSecondsFromSearch', () => {
+  it('defaults, reads ?clip=N and clamps', () => {
+    expect(clipSecondsFromSearch('')).toBe(6);
+    expect(clipSecondsFromSearch('?clip=9')).toBe(9);
+    expect(clipSecondsFromSearch('?clip=1')).toBe(3);
+    expect(clipSecondsFromSearch('?clip=60')).toBe(10);
+    expect(clipSecondsFromSearch('?clip=abc')).toBe(6);
   });
 });

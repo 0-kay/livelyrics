@@ -37,6 +37,13 @@ export class FloatRingBuffer {
     return out;
   }
 
+  /** The most recent n samples in chronological order (fewer if less is buffered). */
+  snapshotLast(n: number): Float32Array {
+    const all = this.snapshot();
+    const count = Math.max(0, Math.min(Math.floor(n), all.length));
+    return all.subarray(all.length - count);
+  }
+
   clear(): void {
     this.writeIndex = 0;
     this.filled = 0;

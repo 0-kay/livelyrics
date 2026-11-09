@@ -2,6 +2,8 @@ import {
   AdaptivePlaybackClock,
   RecognitionScheduler,
   SCHEDULER_CONFIG,
+  CAPTURE_CONFIG,
+  TRIGGER_CONFIG,
   sampleFromRecognition,
   type ClockAction,
   type IdentifyResponse,
@@ -25,6 +27,14 @@ export interface SyncSessionDeps {
   clearTimer?: (handle: unknown) => void;
   onChange?: (s: SyncSnapshot) => void;
   latencyCompMs?: number;
+  /**
+   * How long after a trigger (song end, gap in the audio) to wait before
+   * recognizing, so the clip holds only the new audio. Default: clip length
+   * plus a small margin.
+   */
+  settleMs?: number;
+  /** Override the recognition scheduler (tests use this to make regular checks rare). */
+  scheduler?: RecognitionScheduler;
 }
 
 export interface SyncSnapshot {
@@ -52,11 +62,15 @@ const trackKey = (t: TrackMatch) => `${t.artist.trim().toLowerCase()}|${t.title.
  */
 export class SyncSession {
   readonly clock: AdaptivePlaybackClock;
-  private readonly scheduler = new RecognitionScheduler();
+  private readonly scheduler: RecognitionScheduler;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
   private timer: unknown = null;
+  private nextAt = 0;
+  private inflight = false;
+  private soonMs: number | null = null;
+  private readonly settleMs: number;
   private generation = 0;
   private snap: SyncSnapshot = {
     running: false,
@@ -72,10 +86,12 @@ export class SyncSession {
   };
 
   constructor(private readonly deps: SyncSessionDeps) {
+    this.scheduler = deps.scheduler ?? new RecognitionScheduler();
     this.clock = new AdaptivePlaybackClock({ latencyCompMs: deps.latencyCompMs });
     this.now = deps.now ?? (() => performance.now());
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+    this.settleMs = deps.settleMs ?? CAPTURE_CONFIG.clipSeconds * 1000 + TRIGGER_CONFIG.settleMarginMs;
   }
 
   get snapshot(): SyncSnapshot {
@@ -90,6 +106,8 @@ export class SyncSession {
   start(): void {
     if (this.snap.running) return;
     this.generation++;
+    this.inflight = false;
+    this.soonMs = null;
     this.scheduler.reset();
     this.clock.reset();
     this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0 });
@@ -98,17 +116,48 @@ export class SyncSession {
 
   stop(): void {
     this.generation++;
+    this.inflight = false;
+    this.soonMs = null;
     if (this.timer !== null) this.clearTimer(this.timer);
     this.timer = null;
     this.update({ running: false });
   }
 
+  /**
+   * Ask for a recognition sooner than the timer would give one, for example
+   * after a gap in the audio. Never delays a check that is already due earlier.
+   */
+  recheckSoon(ms: number = this.settleMs): void {
+    if (!this.snap.running) return;
+    if (this.inflight) {
+      this.soonMs = Math.min(this.soonMs ?? Infinity, ms);
+      return;
+    }
+    if (this.timer !== null && this.nextAt - this.now() <= ms) return;
+    if (this.timer !== null) this.clearTimer(this.timer);
+    this.timer = null;
+    this.schedule(ms);
+  }
+
   private schedule(ms: number) {
     const gen = this.generation;
+    let wait = ms;
+    if (this.soonMs !== null) {
+      wait = Math.min(wait, this.soonMs);
+      this.soonMs = null;
+    }
+    this.nextAt = this.now() + wait;
     this.timer = this.setTimer(() => {
       this.timer = null;
       if (gen === this.generation) void this.tick(gen);
-    }, ms);
+    }, wait);
+  }
+
+  /** Wall ms until the matched track should end at the current rate, or null if unknown. */
+  private msUntilEnd(match: TrackMatch, rate: number): number | null {
+    const pos = this.clock.positionAt(this.now());
+    if (pos === null || !(match.durationMs > 0)) return null;
+    return Math.max(0, (match.durationMs - pos) / Math.max(rate, 0.1));
   }
 
   private async tick(gen: number): Promise<void> {
@@ -119,9 +168,11 @@ export class SyncSession {
     }
     const sentAt = this.now();
     let res: IdentifyResponse;
+    this.inflight = true;
     try {
       res = await this.deps.identify(clip.blob);
     } catch (e) {
+      if (gen === this.generation) this.inflight = false;
       if (gen !== this.generation) return;
       // Network or server trouble: keep the clock running and retry later.
       this.update({ error: e instanceof Error ? e.message : String(e), lastAction: 'error' });
@@ -129,6 +180,7 @@ export class SyncSession {
       return;
     }
     if (gen !== this.generation) return;
+    this.inflight = false;
     const responseAt = this.now();
     const recognitions = this.snap.recognitions + 1;
 
@@ -170,7 +222,12 @@ export class SyncSession {
       error: null,
       recognitions,
     });
-    this.schedule(d.nextDelayMs);
+    // The song should be over by now: check again once the buffer holds only
+    // new audio, instead of waiting out the 20-30s timer.
+    let next = d.nextDelayMs;
+    const endIn = this.msUntilEnd(res.match, upd.rate);
+    if (endIn !== null) next = Math.min(next, Math.max(endIn + this.settleMs, TRIGGER_CONFIG.minEndRecheckMs));
+    this.schedule(next);
   }
 
   private update(p: Partial<SyncSnapshot>) {

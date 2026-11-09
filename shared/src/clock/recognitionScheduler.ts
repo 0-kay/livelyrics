@@ -82,6 +82,10 @@ export class RecognitionScheduler {
         break;
     }
 
+    // A weak match while locked is a hint that something changed (new song, noise):
+    // go back to fast checks instead of waiting 20-30s.
+    if (!good && this._state === 'locked') this._state = 'drifting';
+
     const rateReady = (r.rateSpanMs ?? Infinity) >= this.cfg.minLockSpanMs;
     if (this.streak >= this.cfg.samplesToLock && rateReady) this._state = 'locked';
     else if (this._state === 'searching') this._state = 'confirming';

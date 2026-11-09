@@ -1,4 +1,5 @@
 import { FloatRingBuffer } from './ringBuffer.js';
+import { SilenceGapDetector } from './silence.js';
 import { downsample, encodeWav } from './wav.js';
 
 export interface MicClip {
@@ -14,6 +15,8 @@ export interface MicRecorderOptions {
   bufferSeconds?: number;
   /** Sample rate of the uploaded WAV. Default 16000. */
   targetSampleRate?: number;
+  /** Called when sound returns after a gap in the audio (a track ended or was cut). */
+  onGapEnd?: () => void;
 }
 
 // AudioWorklet that forwards mono input frames to the main thread.
@@ -40,10 +43,14 @@ export class MicRecorder {
   private lastSampleAt = 0;
   private readonly bufferSeconds: number;
   private readonly targetSampleRate: number;
+  private readonly gap = new SilenceGapDetector();
+  /** Set or replace the gap callback at any time. */
+  onGapEnd: (() => void) | undefined;
 
   constructor(opts: MicRecorderOptions = {}) {
     this.bufferSeconds = opts.bufferSeconds ?? 10;
     this.targetSampleRate = opts.targetSampleRate ?? 16_000;
+    this.onGapEnd = opts.onGapEnd;
   }
 
   get running(): boolean {
@@ -64,11 +71,13 @@ export class MicRecorder {
       URL.revokeObjectURL(url);
     }
     this.ring = new FloatRingBuffer(Math.round(ctx.sampleRate * this.bufferSeconds));
+    this.gap.reset();
     const src = ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(ctx, 'livelyrics-tap');
     this.node.port.onmessage = (e: MessageEvent<Float32Array>) => {
       this.ring?.push(e.data);
       this.lastSampleAt = performance.now();
+      if (this.gap.push(e.data, this.lastSampleAt)) this.onGapEnd?.();
     };
     src.connect(this.node);
     // Keep the graph pulling without making sound.
@@ -83,10 +92,14 @@ export class MicRecorder {
     return this.ring.length / this.ctx.sampleRate;
   }
 
-  /** Export the buffered audio, or null if less than minSeconds is available. */
-  getClip(minSeconds = 8): MicClip | null {
-    if (!this.ctx || !this.ring || this.bufferedSeconds() < minSeconds) return null;
-    const raw = this.ring.snapshot();
+  /**
+   * Export the most recent `seconds` of audio, or null if less than that is
+   * buffered yet. Only the last `seconds` are sent, so a shorter clip really is
+   * a shorter upload.
+   */
+  getClip(seconds = 8): MicClip | null {
+    if (!this.ctx || !this.ring || this.bufferedSeconds() < seconds) return null;
+    const raw = this.ring.snapshotLast(Math.round(seconds * this.ctx.sampleRate));
     const pcm = downsample(raw, this.ctx.sampleRate, this.targetSampleRate);
     const rate = Math.min(this.targetSampleRate, this.ctx.sampleRate);
     return {

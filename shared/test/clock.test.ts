@@ -211,6 +211,15 @@ describe('RecognitionScheduler', () => {
     expect(s.onResult({ ...agree, action: 'suspect' }).state).toBe('drifting');
   });
 
+  it('goes back to fast checks on a weak match while locked', () => {
+    const sch = new RecognitionScheduler({ random: () => 0 });
+    for (let i = 0; i < 4; i++) sch.onResult({ matched: true, score: 90, action: i === 0 ? 'anchor' : 'agree', rateSpanMs: 30_000 });
+    expect(sch.state).toBe('locked');
+    const d = sch.onResult({ matched: true, score: 20, action: 'agree', rateSpanMs: 30_000 });
+    expect(d.state).toBe('drifting');
+    expect(d.nextDelayMs).toBe(SCHEDULER_CONFIG.searchIntervalMs);
+  });
+
   it('drops the lock after repeated misses', () => {
     const s = new RecognitionScheduler();
     [1, 2, 3].forEach(() => s.onResult(agree));

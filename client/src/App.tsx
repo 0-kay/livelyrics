@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CONCERT_CONFIG, type SyncState } from '@livelyrics/shared';
+import { CAPTURE_CONFIG, CONCERT_CONFIG, TRIGGER_CONFIG, type SyncState } from '@livelyrics/shared';
 import { health, identify, transcribe } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
+import { clipSecondsFromSearch } from './config.js';
 import { LyricsPlayer } from './lyrics/LyricsPlayer.js';
 import { ConcertLoop, type ConcertSnapshot } from './sync/concertLoop.js';
 import { SyncSession, type SyncSnapshot } from './sync/syncSession.js';
 
-const CLIP_SECONDS = 9;
+/** Seconds of audio per recognition. Add ?clip=9 to the URL to compare lengths. */
+const CLIP_SECONDS = clipSecondsFromSearch(typeof window === 'undefined' ? '' : window.location.search);
+const SETTLE_MS = CLIP_SECONDS * 1000 + TRIGGER_CONFIG.settleMarginMs;
 
 export const STATE_LABEL: Record<SyncState, string> = {
   searching: 'Listening',
@@ -16,7 +19,7 @@ export const STATE_LABEL: Record<SyncState, string> = {
 };
 
 export function App() {
-  const recorder = useRef(new MicRecorder({ bufferSeconds: 10 }));
+  const recorder = useRef(new MicRecorder({ bufferSeconds: CAPTURE_CONFIG.bufferSeconds }));
   const session = useRef<SyncSession | null>(null);
   const concert = useRef<ConcertLoop | null>(null);
   const [snap, setSnap] = useState<SyncSnapshot | null>(null);
@@ -85,8 +88,11 @@ export function App() {
         getClip: () => rec.getClip(CLIP_SECONDS),
         identify: (blob) => identify(blob),
         onChange: setSnap,
+        settleMs: SETTLE_MS,
       });
       session.current = s;
+      // Sound returning after a gap usually means a new track: check soon.
+      rec.onGapEnd = () => s.recheckSoon(SETTLE_MS);
       s.start();
     } catch (e) {
       await recorder.current.stop();

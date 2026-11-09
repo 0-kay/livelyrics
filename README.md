@@ -69,6 +69,12 @@ All of this lives in `shared/src/clock/` and every tuning constant is in `shared
 4. Drift handling: a sample within 350ms agrees; up to 1500ms off is nudged out gradually (the shown position never jumps or runs backwards); more than 1500ms is held as a suspect and only snaps when the next sample confirms it, so one bad result cannot throw the lyrics off.
 5. Scheduling: recognize every 2s while searching, lock on after 3 agreeing samples once the rate estimate covers 20s, then re-check every 20 to 30s. A nudge or suspect while locked goes back to fast checks; 3 misses in a row drop the song.
 
+6. Early re-checks, so a new song or a drift is noticed in seconds instead of up to 30s later (`TRIGGER_CONFIG` in the same config file):
+   - **Song end:** the clock knows the matched track's length, so a check is scheduled for the end of the song plus the clip length (so the clip holds only new audio).
+   - **Gap in the audio:** `client/src/audio/silence.ts` watches the mic locally (no network). Sound returning after about 1.5s of near-silence triggers a check after the same settle time. The silence level is relative to the recent average, so room noise does not hide a gap.
+   - **Weak match while locked:** a score below `minLockScore` puts the scheduler back on fast checks.
+7. Clip length: each recognition sends only the most recent `CAPTURE_CONFIG.clipSeconds` (default 6) of the rolling buffer. Add `?clip=9` to the page URL (allowed range 3 to 10) to compare lengths on real songs without a rebuild. Shorter clips upload faster and lock sooner but match less reliably in noise.
+
 The synthetic harness in `shared/test/harness.ts` simulates playback at 0.8x, 0.9x, 1.0x, 1.1x and 1.25x with jitter, outliers, misses, variable latency, seeks and mid-song speed changes.
 
 ## Concert mode (experimental)

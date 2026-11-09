@@ -51,6 +51,33 @@ export const SCHEDULER_CONFIG = {
   maxMisses: 3,
 } as const;
 
+/**
+ * Mic capture and the cheap triggers that ask for an early recognition
+ * (end of the song, a gap in the audio) instead of waiting for the 20-30s timer.
+ */
+export const CAPTURE_CONFIG = {
+  /** Seconds of the most recent audio sent per recognition. Override with ?clip=N in the URL. */
+  clipSeconds: 6,
+  /** Allowed range for the clip length override. */
+  minClipSeconds: 3,
+  maxClipSeconds: 10,
+  /** Rolling mic buffer length in seconds. Must be at least maxClipSeconds. */
+  bufferSeconds: 10,
+} as const;
+
+export const TRIGGER_CONFIG = {
+  /** A frame is silent when its RMS is below this fraction of the recent average level. */
+  silenceRelativeRms: 0.12,
+  /** ... and never louder than this absolute RMS, so room noise alone cannot hide a gap. */
+  silenceAbsoluteFloor: 0.002,
+  /** Silence must last this long (ms) before sound returning counts as a gap end. */
+  minGapMs: 1_500,
+  /** Extra wait (ms) after a trigger so the clip holds only the new audio. Added to the clip length. */
+  settleMarginMs: 700,
+  /** Never schedule the end-of-song recheck sooner than this (ms). */
+  minEndRecheckMs: 1_500,
+} as const;
+
 /** Duration ratio scaling for slowed or sped versions. */
 export const SCALING_CONFIG = {
   /** Only scale when durations differ by more than this fraction. */
