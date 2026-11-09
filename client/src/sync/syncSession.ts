@@ -39,6 +39,8 @@ export interface SyncSessionDeps {
   scheduler?: RecognitionScheduler;
   /** Clip length for the first check and for checks after a suspected change (s). */
   quickClipSeconds?: number;
+  /** Seconds of audio buffered right now, so a searching clip can grow up to it. */
+  bufferedSeconds?: () => number;
 }
 
 /** Returning to the song we just left within this long needs two answers in a row (ms). */
@@ -86,6 +88,10 @@ export class SyncSession {
   private readonly quickClipSeconds: number;
   /** Use the short clip for the next check (first check, suspected change). */
   private quickNext = true;
+  /** "No match" answers in a row while no song is on; each one grows the next clip. */
+  private searchMisses = 0;
+  /** When the last song was lost; a searching clip never reaches back before it (old song audio). */
+  private lostAtMs: number | null = null;
   /** Song we switched away from, and when, for the flip-back guard. */
   private previous: { key: string; at: number } | null = null;
   private pendingBack: string | null = null;
@@ -131,6 +137,8 @@ export class SyncSession {
     this.inflight = false;
     this.soonMs = null;
     this.quickNext = true;
+    this.searchMisses = 0;
+    this.lostAtMs = null;
     this.previous = null;
     this.pendingBack = null;
     this.scheduler.reset();
@@ -227,8 +235,24 @@ export class SyncSession {
     return Math.max(0, (match.durationMs - pos) / Math.max(rate, 0.1));
   }
 
+  /**
+   * Clip length for the next check: the short quick clip when asked for; while
+   * searching, longer after every miss (up to what is buffered); otherwise the
+   * routine length.
+   */
+  clipSeconds(): number | undefined {
+    if (this.quickNext) return this.quickClipSeconds;
+    if (this.snap.track) return undefined;
+    let want = Math.min(CAPTURE_CONFIG.maxClipSeconds, this.quickClipSeconds + CAPTURE_CONFIG.searchClipStepSeconds * this.searchMisses);
+    // After losing a song, only grow over audio heard since then, or the old song is found again.
+    if (this.lostAtMs !== null) want = Math.min(want, (this.now() - this.lostAtMs) / 1000);
+    const buffered = this.deps.bufferedSeconds?.();
+    if (buffered !== undefined) want = Math.min(want, Math.floor(buffered * 10) / 10);
+    return Math.max(this.quickClipSeconds, want);
+  }
+
   private async tick(gen: number): Promise<void> {
-    const clip = this.deps.getClip(this.quickNext ? this.quickClipSeconds : undefined);
+    const clip = this.deps.getClip(this.clipSeconds());
     if (!clip) {
       this.schedule(BUFFER_WAIT_MS);
       return;
@@ -253,8 +277,11 @@ export class SyncSession {
     const recognitions = this.snap.recognitions + 1;
 
     if (!res.match) {
+      if (!this.snap.track) this.searchMisses++;
       const d = this.scheduler.onResult({ matched: false });
       if (d.lostLock) {
+        this.searchMisses = 0;
+        this.lostAtMs = responseAt;
         this.clock.reset();
         this.update({ track: null, lyrics: null, lyricsTimeScale: 1, rate: 1, changeSuspected: false });
       }
@@ -263,6 +290,8 @@ export class SyncSession {
       return;
     }
 
+    this.searchMisses = 0;
+    this.lostAtMs = null;
     const newKey = trackKey(res.match);
     const songChanged = !this.snap.track || trackKey(this.snap.track) !== newKey;
     // During a DJ crossfade answers can alternate between two songs. Going back to the song we

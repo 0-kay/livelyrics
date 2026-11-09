@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RecognitionScheduler, type IdentifyResponse, type TrackMatch } from '@livelyrics/shared';
+import { CAPTURE_CONFIG, RecognitionScheduler, type IdentifyResponse, type TrackMatch } from '@livelyrics/shared';
 import { SyncSession, type SyncSnapshot } from '../src/sync/syncSession.js';
 
 const TRACK: TrackMatch = { title: 'Paper Lanterns', artist: 'The Mock Ensemble', durationMs: 180_000, playOffsetMs: 0, score: 100 };
@@ -247,5 +247,26 @@ describe('SyncSession', () => {
     h.session.checkTempo(120);
     h.session.suspectSongChange(3_000);
     expect(h.session.checkTempo(150)).toBe('idle');
+  });
+
+  it('grows the clip after each miss while searching, up to what is buffered', () => {
+    const asked: (number | undefined)[] = [];
+    const s = new SyncSession({
+      now: () => 0,
+      setTimer: () => 0,
+      clearTimer: () => {},
+      getClip: (sec) => {
+        asked.push(sec);
+        return null;
+      },
+      identify: async () => ({ match: null, lyrics: null, processingMs: 1, lyricsCached: false, lyricsTimeScale: 1 }),
+      bufferedSeconds: () => 7,
+    });
+    expect(s.clipSeconds()).toBe(CAPTURE_CONFIG.quickClipSeconds); // first try: quick
+    (s as unknown as { quickNext: boolean }).quickNext = false;
+    (s as unknown as { searchMisses: number }).searchMisses = 1;
+    expect(s.clipSeconds()).toBe(CAPTURE_CONFIG.quickClipSeconds + CAPTURE_CONFIG.searchClipStepSeconds);
+    (s as unknown as { searchMisses: number }).searchMisses = 5;
+    expect(s.clipSeconds()).toBe(7); // capped by the buffer
   });
 });

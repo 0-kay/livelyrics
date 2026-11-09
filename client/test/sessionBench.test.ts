@@ -63,6 +63,25 @@ describe('session benchmark', () => {
     for (const r of out) expect(r.wrongSongMs).toBe(0);
   }, 60_000);
 
+  it('phone mic in a room: the first song is found without a long wait', async () => {
+    // Short clips miss far more often on a real mic (here +20% per second under 8s). Growing the
+    // clip after each miss keeps the first song quick; fixed short clips left half the sessions
+    // waiting over 15s ("move closer"), which is what a real phone test showed.
+    const sc = SCENARIOS['phone mic in a room, short clips miss more']!;
+    const firsts: number[] = [];
+    const fixed: number[] = [];
+    for (let seed = 1; seed <= 10; seed++) {
+      const base = { ...sc, ...MODELS.precise, shortClipMissPerSecond: 0.2, seed };
+      firsts.push((await simulateSession(base)).firstLyricsMs ?? Infinity);
+      fixed.push((await simulateSession({ ...base, fixedClips: true })).firstLyricsMs ?? Infinity);
+    }
+    firsts.sort((a, b) => a - b);
+    fixed.sort((a, b) => a - b);
+    expect(Math.max(...firsts)).toBeLessThan(15_000);
+    expect(firsts[5]!).toBeLessThan(11_000);
+    expect(firsts[5]!).toBeLessThan(fixed[5]!);
+  }, 120_000);
+
   it.skipIf(!process.env.BENCH_OUT)('writes the full report', async () => {
     const report: Record<string, unknown> = {};
     for (const name of Object.keys(SCENARIOS)) {

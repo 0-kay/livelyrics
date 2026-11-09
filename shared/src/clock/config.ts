@@ -92,13 +92,23 @@ export const SCHEDULER_CONFIG = {
  * (end of the song, a gap in the audio) instead of waiting for the 20-30s timer.
  */
 export const CAPTURE_CONFIG = {
-  /** Seconds of the most recent audio sent per recognition. Override with ?clip=N in the URL. */
-  clipSeconds: 5,
+  /**
+   * Seconds of the most recent audio sent per routine check while a song is on.
+   * Override with ?clip=N in the URL. Shorter clips miss more often on a real mic.
+   */
+  clipSeconds: 6,
   /**
    * Shorter clip for the very first check (lyrics sooner) and for checks
    * triggered by a suspected song change (the clip is mostly new audio sooner).
    */
   quickClipSeconds: 4,
+  /**
+   * While searching, each "no match" grows the next clip by this many seconds,
+   * up to maxClipSeconds (or what is buffered): 4s, then 6, 8, 10. A first try
+   * on a short clip is fast when it works; longer clips match far more reliably
+   * through a phone or laptop mic in a room.
+   */
+  searchClipStepSeconds: 2,
   /** Allowed range for the clip length override. */
   minClipSeconds: 3,
   maxClipSeconds: 10,

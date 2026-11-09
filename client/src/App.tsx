@@ -143,6 +143,7 @@ export function App() {
       await rec.start();
       const s = new SyncSession({
         getClip: (seconds) => rec.getClip(seconds ?? CLIP_SECONDS),
+        bufferedSeconds: () => rec.bufferedSeconds(),
         identify: (blob) => identify(blob),
         onChange: setSnap,
         settleMs: SETTLE_MS,

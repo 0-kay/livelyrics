@@ -54,6 +54,13 @@ export interface SessionSimOptions {
   deps?: Partial<SyncSessionDeps>;
   /** Lyric line spacing for the wrong-line metric (ms). */
   lineMs?: number;
+  /**
+   * Extra miss probability per second of clip under 8s (a real mic in a room:
+   * short clips match less often). 0 means clip length does not matter.
+   */
+  shortClipMissPerSecond?: number;
+  /** Turn off growing clips while searching (to compare with fixed clips). */
+  fixedClips?: boolean;
 }
 
 export interface SessionSimResult {
@@ -122,7 +129,8 @@ export async function simulateSession(o: SessionSimOptions): Promise<SessionSimR
     let best = 0;
     for (let i = 1; i < shares.length; i++) if (shares[i]! > shares[best]!) best = i;
     const top = shares[best]!;
-    let miss = rand() < (o.missProb ?? 0.05);
+    const shortPenalty = (o.shortClipMissPerSecond ?? 0) * Math.max(0, 8 - clipMs / 1000);
+    let miss = rand() < (o.missProb ?? 0.05) + shortPenalty;
     if (top < 0.6 && rand() < 0.6) miss = true;
     let res: IdentifyResponse;
     if (miss) res = { match: null, lyrics: null, processingMs: 5, lyricsCached: false, lyricsTimeScale: 1 };
@@ -147,11 +155,12 @@ export async function simulateSession(o: SessionSimOptions): Promise<SessionSimR
     },
     // Like the mic: no clip until that much audio has been buffered since Listen.
     getClip: (seconds?: number) => {
-      const sec = seconds ?? o.clipSeconds ?? 5;
+      const sec = o.fixedClips ? Math.min(seconds ?? 5, 5) : (seconds ?? o.clipSeconds ?? 6);
       return now < sec * 1000 ? null : { blob: new Blob([new Uint8Array(Math.round(sec * 1000))]), capturedAtMs: now };
     },
     identify,
     settleMs: (o.clipSeconds ?? 6) * 1000 + 700,
+    bufferedSeconds: o.fixedClips ? undefined : () => Math.min(10, now / 1000),
     scheduler: o.scheduler,
     ...o.deps,
   } as SyncSessionDeps);
@@ -273,6 +282,17 @@ export const SCENARIOS: Record<string, Omit<SessionSimOptions, 'seed'>> = {
     switchAtMs: [80_000],
     durationMs: 170_000,
     rhythmTriggerAfterMs: null,
+  },
+  'phone mic in a room, short clips miss more': {
+    songs: [
+      { title: 'A', rate: 1, startPosMs: 50_000, durationMs: 200_000 },
+      { title: 'B', rate: 1, startPosMs: 0, durationMs: 200_000 },
+    ],
+    switchAtMs: [80_000],
+    durationMs: 160_000,
+    missProb: 0.1,
+    shortClipMissPerSecond: 0.12,
+    rhythmTriggerAfterMs: 4000,
   },
   'noisy room, more misses and outliers': {
     songs: [

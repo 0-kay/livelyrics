@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CAPTURE_CONFIG } from '@livelyrics/shared';
 import { FloatRingBuffer } from '../src/audio/ringBuffer.js';
 import { SilenceGapDetector } from '../src/audio/silence.js';
 import { clipSecondsFromSearch } from '../src/config.js';
@@ -117,10 +118,10 @@ describe('SilenceGapDetector', () => {
 
 describe('clipSecondsFromSearch', () => {
   it('defaults, reads ?clip=N and clamps', () => {
-    expect(clipSecondsFromSearch('')).toBe(5);
+    expect(clipSecondsFromSearch('')).toBe(CAPTURE_CONFIG.clipSeconds);
     expect(clipSecondsFromSearch('?clip=9')).toBe(9);
     expect(clipSecondsFromSearch('?clip=1')).toBe(3);
     expect(clipSecondsFromSearch('?clip=60')).toBe(10);
-    expect(clipSecondsFromSearch('?clip=abc')).toBe(5);
+    expect(clipSecondsFromSearch('?clip=abc')).toBe(CAPTURE_CONFIG.clipSeconds);
   });
 });
