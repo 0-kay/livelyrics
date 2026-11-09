@@ -1,4 +1,5 @@
 import { FloatRingBuffer } from './ringBuffer.js';
+import { RhythmWatch, type BeatFrame, type ChangeSnapshot } from './rhythm.js';
 import { SilenceGapDetector } from './silence.js';
 import { downsample, encodeWav } from './wav.js';
 
@@ -46,6 +47,10 @@ export class MicRecorder {
   private readonly gap = new SilenceGapDetector();
   /** Set or replace the gap callback at any time. */
   onGapEnd: (() => void) | undefined;
+  /** Called when the local rhythm tracker decides the song changed (no network). */
+  onSongChange: (() => void) | undefined;
+  private rhythm: RhythmWatch | null = null;
+  private armedKey: string | null = null;
 
   constructor(opts: MicRecorderOptions = {}) {
     this.bufferSeconds = opts.bufferSeconds ?? 10;
@@ -72,11 +77,15 @@ export class MicRecorder {
     }
     this.ring = new FloatRingBuffer(Math.round(ctx.sampleRate * this.bufferSeconds));
     this.gap.reset();
+    this.rhythm = new RhythmWatch(ctx.sampleRate);
+    this.rhythm.change.onChange = () => this.onSongChange?.();
+    if (this.armedKey) this.rhythm.change.arm(this.armedKey);
     const src = ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(ctx, 'livelyrics-tap');
     this.node.port.onmessage = (e: MessageEvent<Float32Array>) => {
       this.ring?.push(e.data);
       this.lastSampleAt = performance.now();
+      this.rhythm?.push(e.data, this.lastSampleAt);
       if (this.gap.push(e.data, this.lastSampleAt)) this.onGapEnd?.();
     };
     src.connect(this.node);
@@ -84,6 +93,26 @@ export class MicRecorder {
     const sink = ctx.createGain();
     sink.gain.value = 0;
     this.node.connect(sink).connect(ctx.destination);
+  }
+
+  /** Learn the beat grid of this song and watch for a change. Same key again is a no-op unless a change already fired. */
+  armRhythm(key: string): void {
+    this.armedKey = key;
+    this.rhythm?.change.arm(key);
+  }
+
+  disarmRhythm(): void {
+    this.armedKey = null;
+    this.rhythm?.change.disarm();
+  }
+
+  /** Beat readout for the visuals, or null when the mic is off. */
+  beatFrame(nowMs: number): BeatFrame | null {
+    return this.rhythm ? this.rhythm.frame(nowMs) : null;
+  }
+
+  rhythmSnapshot(): ChangeSnapshot | null {
+    return this.rhythm ? this.rhythm.change.snapshot : null;
   }
 
   /** Seconds of audio currently buffered. */
@@ -118,5 +147,7 @@ export class MicRecorder {
     this.stream = null;
     this.node = null;
     this.ring = null;
+    this.rhythm = null;
+    this.armedKey = null;
   }
 }

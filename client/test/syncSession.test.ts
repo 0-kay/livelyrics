@@ -187,4 +187,29 @@ describe('SyncSession', () => {
     expect(h.session.snapshot.lyrics?.lines[0]?.text).toBe('new');
     expect(h.session.snapshot.state).not.toBe('locked');
   });
+
+  it('suspectSongChange flags the change and checks within the settle time minus the new audio', async () => {
+    const h = harness({ scheduler: slowScheduler() });
+    h.session.start();
+    await h.runFor(40_000);
+    expect(h.session.snapshot.state).toBe('locked');
+    const before = h.calls();
+    h.session.suspectSongChange(3_000);
+    expect(h.session.snapshot.changeSuspected).toBe(true);
+    // Settle is 7s; 3s of new audio already played, so the check is due in 4s, not 100s.
+    await h.runFor(3_500);
+    expect(h.calls()).toBe(before);
+    await h.runFor(2_000);
+    expect(h.calls()).toBe(before + 1);
+    // Same song came back: the flag clears.
+    expect(h.session.snapshot.changeSuspected).toBe(false);
+    expect(h.session.snapshot.track?.title).toBe('Paper Lanterns');
+  });
+
+  it('ignores a suspected change before any song is matched', () => {
+    const h = harness({});
+    h.session.start();
+    h.session.suspectSongChange();
+    expect(h.session.snapshot.changeSuspected).toBe(false);
+  });
 });

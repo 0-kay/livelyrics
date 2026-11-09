@@ -3,6 +3,7 @@ import type { SyncedLyrics, TrackMatch } from '@livelyrics/shared';
 import { reduceDisplay } from '../src/ui/displaySong.js';
 import { listenCopy, LONG_COPY, MISS_COPY, BUFFER_COPY, SEARCH_COPY } from '../src/ui/listenCopy.js';
 import { activeIndex, computeLayer, opacityForDistance, prepareLines, type LayerInput } from '../src/ui/lyricsLayout.js';
+import { beatFx, FlashLimiter } from '../src/ui/beatFx.js';
 import { NIGHT, PHONE, paletteIndexFor, sizesFor, speedLabel, TV } from '../src/ui/theme.js';
 
 const lines = [
@@ -127,6 +128,13 @@ describe('reduceDisplay', () => {
     expect(b.fromPal).toBe(a.pal);
     expect(b.matchedAt).toBe(200);
   });
+  it('shows the next-song state while a change is suspected, and returns if the same song is confirmed', () => {
+    const a = reduceDisplay(null, { running: true, track: track('A'), lyrics: lyr }, 100, null)!;
+    const sus = reduceDisplay(a, { running: true, track: track('A'), lyrics: lyr, suspected: true }, 400, null)!;
+    expect(sus.lostAt).toBe(400);
+    const same = reduceDisplay(sus, { running: true, track: track('A'), lyrics: lyr, suspected: false }, 900, null)!;
+    expect(same.lostAt).toBeNull();
+  });
   it('marks instrumental and missing lyrics', () => {
     expect(reduceDisplay(null, { running: true, track: track('A'), lyrics: { lines: [], instrumental: true } }, 0, null)!.instrumental).toBe(true);
     expect(reduceDisplay(null, { running: true, track: track('A'), lyrics: null }, 0, null)!.noLyrics).toBe(true);
@@ -153,5 +161,33 @@ describe('theme helpers', () => {
     expect(sizesFor(390, 844)).toBe(PHONE);
     expect(sizesFor(1920, 1080)).toBe(TV);
     expect(sizesFor(1024, 1366)).toBe(PHONE);
+  });
+});
+
+describe('beat effects', () => {
+  const pal = { a: 'A', b: 'B', c: 'C' };
+  const frame = (energy: 'calm' | 'groove' | 'hype', beatIndex = 0, pulse = 1) => ({ pulse, beatIndex, level: 0.7, energy, bpm: 120, onGrid: true, next: [] });
+  it('turns everything off with reduced motion or no mic', () => {
+    expect(beatFx(frame('hype'), pal, 0, new FlashLimiter(), true, 0).lights).toEqual([]);
+    expect(beatFx(null, pal, 0, new FlashLimiter(), false, 0).lineScale).toBe(1);
+  });
+  it('picks a pattern by energy', () => {
+    const lim = () => new FlashLimiter();
+    expect(beatFx(frame('calm'), pal, 0, lim(), false, 0).lights).toHaveLength(0);
+    expect(beatFx(frame('groove'), pal, 0, lim(), false, 0).lights).toHaveLength(2);
+    const hype = beatFx(frame('hype'), pal, 0, lim(), false, 0);
+    expect(hype.lights).toHaveLength(3);
+    expect(hype.lineScale).toBeGreaterThan(1);
+    expect(hype.lineScale).toBeLessThanOrEqual(1.03);
+  });
+  it('never flashes lights more than 3 times a second, even at 200 BPM', () => {
+    const lim = new FlashLimiter();
+    let flashes = 0;
+    for (let i = 0; i < 200 * 10 / 60; i++) {
+      const t = i * 300;
+      if (beatFx(frame('hype', i), pal, t, lim, false, 0).lights[0]!.opacity > 0) flashes++;
+    }
+    expect(flashes / 10).toBeLessThanOrEqual(3);
+    expect(flashes).toBeGreaterThan(10);
   });
 });

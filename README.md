@@ -87,6 +87,17 @@ The UI in `client/src/ui/` follows the Claude Design handoff (`LiveLyrics.dc.htm
 - Wide landscape screens (1100px or wider) switch to the TV scale. The screen button turns on party mode: full screen, and the controls hide after 3 seconds without interaction.
 - Dark theme by default; add `?theme=light` for the light theme. Reduced motion follows the system setting. The screen stays awake while listening where the browser supports it.
 
+## Beat tracking and the local song-change decision
+
+`client/src/audio/beat.ts` and `rhythm.ts` listen to the same mic frames, on the device, with no network. Constants are in `RHYTHM_CONFIG` (`shared/src/clock/config.ts`).
+
+- **Onsets:** a kick band (150 Hz low-pass) plus the full band, the rise in log energy per 10ms hop, and an adaptive threshold. On synthetic drums, onsets land within about 3ms of the true hit.
+- **Tempo and phase:** autocorrelation of the onset envelope (60 to 180 BPM, gently preferring 120) and a comb for the beat phase, then the next 10 beats are predicted from that grid.
+- **Visuals:** the screen pulses on the predicted beats (30ms early to cover screen latency) and falls back to raw onsets when no tempo is clear. The pattern follows the music over about 1.5s with 2s of hysteresis: calm breathes with the loudness, groove pulses the glows and corner lights per bar, hype cycles colors every beat with a sweeping top light and a small bounce of the current line. Big light flashes are capped at 3 per second (photosensitivity), and reduced motion turns effects off. The listening ring and instrumental bars now follow the real mic loudness.
+- **Song change:** once a song is matched, the tracker learns its beat grid (6s) and checks the incoming rhythm 4 times a second. When a strong rhythm disagrees (another tempo, or hits off the grid, with half and double tempo allowed) for 3s straight, it decides the song changed: the screen goes to "next song" at once and a recognition is sent as soon as the clip holds mostly new audio. If the server says it is the same song, the screen returns and the tracker relearns. No rhythm at all (a breakdown, a quiet bridge) is neutral and never triggers. Slow tempo rides are followed by a small phase-locked loop.
+- **Limits:** naming the new song still needs one recognition. A perfectly beatmatched DJ transition (same tempo and phase) looks like the same song to rhythm alone; those changes still come from the song-end, silence-gap and regular checks.
+- Add `?debug=1` to the URL to see tempo, the learned grid, the on-grid share and the mismatch timer live.
+
 ## Concert mode (experimental)
 
 Set `CONCERT_MODE=on` on the server (real mode also needs `OPENAI_API_KEY`). The client then shows a small LIVE toggle next to Stop, and a quiet caption with the words it just heard. While a song is known, it transcribes the latest 5s every 5s and the server fuzzy-matches the words against lyric spans of one to three lines within 30s before and 45s after the clock position (`shared/src/concert/matcher.ts`, a fuzzy substring edit distance with no extra dependencies). The clock only moves when the match is confident: score at least 0.72, no other place in the window within 0.08 of it, more than 2.5s away from the clock, and for jumps over 15s a second consistent match (`ReanchorPolicy`). In mock mode the transcription mock follows the same virtual song as the recognition mock, so the toggle can be tried without keys.

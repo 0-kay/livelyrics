@@ -29,6 +29,8 @@ export interface DisplayInput {
   running: boolean;
   track: TrackMatch | null;
   lyrics: SyncedLyrics | null;
+  /** The rhythm says the song changed; show the next-song state until a check answers. */
+  suspected?: boolean;
 }
 
 export const trackKey = (t: { title: string; artist: string }) => `${t.artist.trim().toLowerCase()}|${t.title.trim().toLowerCase()}`;
@@ -52,7 +54,7 @@ export function reduceDisplay(
 ): DisplaySong | null {
   if (!inp.running) return null;
   const t = inp.track;
-  if (!t) {
+  if (!t || (inp.suspected && d && d.key === trackKey(t))) {
     if (d && d.lostAt === null) return { ...d, lostAt: nowMs };
     return d;
   }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CAPTURE_CONFIG, CONCERT_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
+import { CAPTURE_CONFIG, CONCERT_CONFIG, RHYTHM_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
 import { health, identify, transcribe } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
 import { clipSecondsFromSearch } from './config.js';
@@ -81,10 +81,19 @@ export function App() {
   // Track the song on screen and empty checks from each session snapshot.
   useEffect(() => {
     const now = performance.now();
-    setDisplay((d) => reduceDisplay(d, { running: Boolean(snap?.running), track: snap?.track ?? null, lyrics: snap?.lyrics ?? null }, now, lastPosRef.current));
+    setDisplay((d) =>
+      reduceDisplay(d, { running: Boolean(snap?.running), track: snap?.track ?? null, lyrics: snap?.lyrics ?? null, suspected: snap?.changeSuspected }, now, lastPosRef.current),
+    );
     if (snap && snap.recognitions > lastRecognitions.current && snap.lastAction === 'miss') setLastMissAt(now);
     lastRecognitions.current = snap?.recognitions ?? 0;
   }, [snap]);
+
+  // Learn the beat grid while a song is on screen; the tracker decides locally when the rhythm says it changed.
+  const displayKey = display && display.lostAt === null ? display.key : null;
+  useEffect(() => {
+    if (displayKey) recorder.current.armRhythm(displayKey);
+    else recorder.current.disarmRhythm();
+  }, [displayKey]);
 
   // Concert loop runs only while listening with the flag available and the toggle on.
   useEffect(() => {
@@ -127,6 +136,8 @@ export function App() {
       session.current = s;
       // Sound returning after a gap usually means a new track: check soon.
       rec.onGapEnd = () => s.recheckSoon(SETTLE_MS);
+      // A different rhythm for 3s straight: move on now, confirm with a check right away.
+      rec.onSongChange = () => s.suspectSongChange(RHYTHM_CONFIG.switchAfterMs);
       lastPosRef.current = null;
       setLastMissAt(null);
       setStartedAt(performance.now());
@@ -146,6 +157,8 @@ export function App() {
 
   const getPositionMs = useCallback(() => session.current?.positionMs() ?? null, []);
   const bufferedSeconds = useCallback(() => recorder.current.bufferedSeconds(), []);
+  const getBeat = useCallback((nowMs: number) => recorder.current.beatFrame(nowMs), []);
+  const getRhythm = useCallback(() => recorder.current.rhythmSnapshot(), []);
   const running = Boolean(snap?.running);
   useWakeLock(running);
 
@@ -164,6 +177,8 @@ export function App() {
         offline={Boolean(snap?.error)}
         display={display}
         getPositionMs={getPositionMs}
+        getBeat={getBeat}
+        getRhythm={getRhythm}
         lastPosRef={lastPosRef}
         concert={{ available: concertAvailable, on: concertOn, lastText: concertSnap?.running ? concertSnap.lastText : null }}
         demoMode={mode === 'mock'}

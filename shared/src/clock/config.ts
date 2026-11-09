@@ -123,3 +123,52 @@ export type ConcertConfig = { -readonly [K in keyof typeof CONCERT_CONFIG]: numb
 
 export type ClockConfig ={ -readonly [K in keyof typeof CLOCK_CONFIG]: number };
 export type SchedulerConfig = { -readonly [K in keyof typeof SCHEDULER_CONFIG]: number };
+
+/**
+ * Local beat tracking on the mic audio (client/src/audio/beat.ts and rhythm.ts).
+ * Drives beat-reactive visuals and the local "the song changed" decision.
+ */
+export const RHYTHM_CONFIG = {
+  /** Analysis hop (seconds). */
+  hopSeconds: 0.01,
+  /** Low-pass cutoff for the kick band (Hz). */
+  kickCutoffHz: 150,
+  /** Minimum time between two onsets (ms). */
+  minOnsetGapMs: 120,
+  /** Onset threshold: running mean plus this many mean deviations. */
+  onsetK: 1.5,
+  /** Onset strength must also beat this absolute floor (log energy units). */
+  onsetFloor: 0.3,
+  /** Hops quieter than this RMS never produce onsets (silence). */
+  silenceRms: 0.0005,
+  /** Onset envelope kept for tempo estimates (seconds). */
+  envelopeSeconds: 8,
+  /** Tempo search range and preferred tempo (BPM). */
+  minBpm: 60,
+  maxBpm: 180,
+  preferBpm: 120,
+  /** Autocorrelation peak needed to trust a tempo (0-1). */
+  minConfidence: 0.25,
+  /** Window used to learn the song's beat grid after a match (seconds). */
+  learnSeconds: 6,
+  /** Window for tempo checks while tracking (seconds). */
+  checkWindowSeconds: 4,
+  /** Onsets from this recent window are compared with the predicted beats (seconds). */
+  onsetWindowSeconds: 2,
+  /** Tempo still matches within this ratio (also at half or double tempo). */
+  tempoTolerance: 0.04,
+  /** An onset is on the grid within this fraction of a beat. */
+  gridTolerance: 0.12,
+  /** Strength-weighted share of onsets that must land on the grid. */
+  minOnGridShare: 0.4,
+  /** Onsets needed in the recent window before a verdict is made. */
+  minOnsets: 3,
+  /** How often the grid is checked (ms). */
+  checkEveryMs: 250,
+  /** Sustained mismatch before deciding the song changed (ms). */
+  switchAfterMs: 3_000,
+  /** Beats predicted ahead (the sequencer). */
+  predictBeats: 10,
+  /** Large light flashes never exceed this rate (photosensitivity). */
+  maxFlashHz: 3,
+} as const;

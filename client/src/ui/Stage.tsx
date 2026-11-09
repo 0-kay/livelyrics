@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type CSSProperties, type ReactNode } from 'react';
 import type { SyncState } from '@livelyrics/shared';
+import type { BeatFrame, ChangeSnapshot } from '../audio/rhythm.js';
+import { beatFx, FlashLimiter } from './beatFx.js';
 import type { DisplaySong } from './displaySong.js';
 import { computeLayer, type Layer, type MeasuredLine } from './lyricsLayout.js';
 import { listenCopy } from './listenCopy.js';
@@ -25,6 +27,10 @@ export interface StageProps {
   offline: boolean;
   display: DisplaySong | null;
   getPositionMs: () => number | null;
+  /** Beat readout from the mic (null when the mic is off). */
+  getBeat?: (nowMs: number) => BeatFrame | null;
+  /** Song-change tracker state, for the ?debug=1 readout. */
+  getRhythm?: () => ChangeSnapshot | null;
   /** Written every frame with the shown position, so a song change can freeze the old lyrics where they were. */
   lastPosRef: { current: { key: string; posMs: number } | null };
   concert: { available: boolean; on: boolean; lastText: string | null };
@@ -50,6 +56,11 @@ function useMedia(query: string): boolean {
     return () => m.removeEventListener('change', on);
   }, [query]);
   return v;
+}
+
+/** ?debug=1 shows the rhythm tracker readout. */
+function debugOn(): boolean {
+  return typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
 }
 
 /** ?theme=light or ?theme=dark from the URL. */
@@ -79,6 +90,8 @@ export function Stage(p: StageProps) {
   const reducedMotion = useMedia('(prefers-reduced-motion: reduce)');
   // Dark by default, as the brief asks. ?theme=light opts into the light theme.
   const th: Theme = useRef(themeOverride()).current === 'light' ? LIGHT : DARK;
+  const debug = useRef(debugOn()).current;
+  const limiter = useRef(new FlashLimiter()).current;
   const rm = reducedMotion;
 
   // Size of the safe area box all layout is relative to.
@@ -197,12 +210,16 @@ export function Stage(p: StageProps) {
   const pal = { a: mix(fromP.a, toP.a, pk), b: mix(fromP.b, toP.b, pk), c: mix(fromP.c, toP.c, pk), glow: '' };
   pal.glow = alpha(pal.a, th.light ? 0.35 : 0.5);
 
+  // Beat-reactive effects from the mic rhythm.
+  const beat = p.running && p.getBeat ? p.getBeat(now) : null;
+  const fx = beatFx(beat, pal, now, limiter, rm, nowS);
+
   const A = rm ? 4 : ambient.current;
   const blobs = (['a', 'b', 'c'] as const).map((k, i) => {
     const size = S.tv ? W * 0.85 : W * 1.55;
     const x = W * (0.5 + 0.34 * Math.sin(A * 0.2 + i * 2.1)) - size / 2;
     const y = H * (0.2 + i * 0.3 + 0.1 * Math.cos(A * 0.16 + i * 1.3)) - size / 2;
-    return { size, bg: `radial-gradient(circle at center, ${pal[k]} 0%, transparent 62%)`, tf: `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)` };
+    return { size, bg: `radial-gradient(circle at center, ${pal[k]} 0%, transparent 62%)`, tf: `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${fx.blobScale.toFixed(3)})` };
   });
 
   const halo = (off: number, period: number, amp: number, maxOp: number) => {
@@ -237,7 +254,10 @@ export function Stage(p: StageProps) {
         return { size, op: sk * cl(0.5 + 0.5 * Math.sin(nowS * 5 + i * 1.7)), tf: `translate(${(S.ring / 2 + Math.cos(ang) * R - size / 2).toFixed(1)}px, ${(S.ring / 2 + Math.sin(ang) * R - size / 2).toFixed(1)}px)` };
       })
     : [];
-  const eqBars = [0, 1, 2, 3, 4].map((i) => (rm ? 0.55 : (0.3 + 0.7 * Math.abs(Math.sin((nowS * Math.PI) / 0.6 + i * 0.95))) * (lc?.searching ? 0.75 : 1)));
+  // Real mic loudness and beats drive the equalizer when available.
+  const eqBars = [0, 1, 2, 3, 4].map((i) =>
+    rm ? 0.55 : beat ? fx.eq[i]! : (0.3 + 0.7 * Math.abs(Math.sin((nowS * Math.PI) / 0.6 + i * 0.95))) * (lc?.searching ? 0.75 : 1),
+  );
   const copyOp = lc ? Math.min(1, lc.slotS / 0.3) : 0;
   const copyY = lc && !rm ? 10 * (1 - ease(lc.slotS / 0.3)) : 0;
 
@@ -308,7 +328,12 @@ export function Stage(p: StageProps) {
     ? { op: rm ? cl(nextT / 0.3) : ease(nextT / 0.35), y: rm ? 0 : 16 * (1 - ease(nextT / 0.35)) }
     : null;
   const instK = rm ? cl((r - 0.1) / 0.3) : ease((r - 0.1) / 0.5);
-  const instBars = Array.from({ length: 9 }, (_, i) => (rm ? 0.5 : 0.25 + 0.75 * Math.abs(Math.sin((nowS * Math.PI) / 0.7 + i * 0.7) * Math.cos(nowS * 0.9 + i * 0.4))));
+  const instBars = Array.from({ length: 9 }, (_, i) => {
+    if (rm) return 0.5;
+    const shape = Math.abs(Math.sin((nowS * Math.PI) / 0.7 + i * 0.7) * Math.cos(nowS * 0.9 + i * 0.4));
+    return beat ? Math.min(1, 0.2 + 0.5 * beat.level * (0.5 + shape) + 0.3 * fx.pulse * (1 - Math.abs(i - 4) / 5)) : 0.25 + 0.75 * shape;
+  });
+  const glowColor = pal[fx.glowSlot];
 
   let capText = '';
   if (p.concert.on && p.concert.lastText) capText = `Heard: “…${p.concert.lastText.trim().split(/\s+/).slice(-4).join(' ').toLowerCase()}”`;
@@ -346,9 +371,19 @@ export function Stage(p: StageProps) {
     >
       <div aria-hidden="true" style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 0 }}>
         {blobs.map((b, i) => (
-          <div key={i} style={{ position: 'absolute', left: 0, top: 0, borderRadius: '50%', width: b.size, height: b.size, background: b.bg, opacity: th.blobOp, transform: b.tf, willChange: 'transform' }} />
+          <div key={i} style={{ position: 'absolute', left: 0, top: 0, borderRadius: '50%', width: b.size, height: b.size, background: b.bg, opacity: th.blobOp + fx.blobOpacity, transform: b.tf, willChange: 'transform' }} />
         ))}
         <div style={{ position: 'absolute', inset: 0, background: th.vignette }} />
+        {fx.lights.map((l, i) => (
+          <div
+            key={i}
+            style={{
+              position: 'absolute', left: 0, top: 0, width: W * 0.9, height: W * 0.9, borderRadius: '50%',
+              background: `radial-gradient(circle at center, ${l.color} 0%, transparent 60%)`, opacity: l.opacity,
+              transform: `translate(${(l.x * W - W * 0.45).toFixed(1)}px, ${(l.y * H - W * 0.45).toFixed(1)}px)`,
+            }}
+          />
+        ))}
       </div>
 
       <div
@@ -511,11 +546,11 @@ export function Stage(p: StageProps) {
                       }}
                       aria-current={ln.active ? 'true' : undefined}
                       aria-hidden={ln.blank ? 'true' : undefined}
-                      style={{ boxSizing: 'border-box', textAlign: 'center', transformOrigin: 'center center', padding: `${S.linePad}px ${pad}px`, opacity: ln.opacity, transform: `scale(${ln.scale})` }}
+                      style={{ boxSizing: 'border-box', textAlign: 'center', transformOrigin: 'center center', padding: `${S.linePad}px ${pad}px`, opacity: ln.opacity, transform: ln.active ? `translateY(${fx.lineLift.toFixed(1)}px) scale(${(ln.scale * fx.lineScale).toFixed(4)})` : `scale(${ln.scale})` }}
                     >
                       {!ln.blank ? (
                         <>
-                          <div style={{ fontSize: S.lineFont, fontWeight: 700, lineHeight: 1.16, letterSpacing: '-0.022em', textWrap: 'balance', textShadow: ln.glow, overflowWrap: 'anywhere' }}>{ln.text}</div>
+                          <div style={{ fontSize: S.lineFont, fontWeight: 700, lineHeight: 1.16, letterSpacing: '-0.022em', textWrap: 'balance', textShadow: ln.active && !th.light ? `0 0 ${fx.glowPx.toFixed(0)}px ${alpha(glowColor, fx.glowAlpha)}` : ln.glow, overflowWrap: 'anywhere' }}>{ln.text}</div>
                           <div aria-hidden="true" style={{ margin: `${S.barGap}px auto 0`, width: S.barW, maxWidth: '70%', height: S.barH, borderRadius: 99, background: th.track, overflow: 'hidden', opacity: ln.barOpacity }}>
                             <div style={{ height: '100%', width: '100%', borderRadius: 99, background: `linear-gradient(90deg, ${pal.a}, ${pal.b})`, transformOrigin: 'left center', transform: `scaleX(${ln.progress})` }} />
                           </div>
@@ -622,7 +657,22 @@ export function Stage(p: StageProps) {
         )}
       </div>
 
+      {debug && running && (
+        <RhythmDebug beat={beat} rhythm={p.getRhythm ? p.getRhythm() : null} />
+      )}
+
       <div aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>{liveText}</div>
+    </div>
+  );
+}
+
+function RhythmDebug({ beat, rhythm }: { beat: BeatFrame | null; rhythm: ChangeSnapshot | null }) {
+  const f = (n: number | null | undefined, d = 0) => (n == null ? '-' : n.toFixed(d));
+  return (
+    <div style={{ position: 'absolute', zIndex: 9, left: 12, bottom: 110, padding: '8px 10px', borderRadius: 10, background: 'rgba(0,0,0,.6)', color: '#fff', fontFamily: MONO, fontSize: 11, lineHeight: 1.5, pointerEvents: 'none' }}>
+      <div>beat {f(beat?.bpm, 1)} BPM · {beat?.energy ?? '-'} · lvl {f(beat?.level, 2)} · {beat?.onGrid ? 'grid' : 'onsets'}</div>
+      <div>song {rhythm?.state ?? '-'} · ref {f(rhythm?.refBpm, 1)} · now {f(rhythm?.bpm, 1)} · conf {f(rhythm?.confidence, 2)}</div>
+      <div>{rhythm?.verdict ?? '-'} · on grid {f(rhythm ? rhythm.onGridShare * 100 : null)}% · off for {f(rhythm ? rhythm.mismatchMs / 1000 : null, 1)}s</div>
     </div>
   );
 }

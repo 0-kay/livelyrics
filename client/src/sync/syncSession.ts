@@ -48,6 +48,11 @@ export interface SyncSnapshot {
   lastErrorMs: number;
   error: string | null;
   recognitions: number;
+  /**
+   * The local rhythm tracker heard a different song. The screen can move on
+   * right away; the next recognition confirms (new song) or clears it (same song).
+   */
+  changeSuspected: boolean;
 }
 
 /** Wait this long when the mic buffer is not full yet (ms). */
@@ -83,6 +88,7 @@ export class SyncSession {
     lastErrorMs: 0,
     error: null,
     recognitions: 0,
+    changeSuspected: false,
   };
 
   constructor(private readonly deps: SyncSessionDeps) {
@@ -110,7 +116,7 @@ export class SyncSession {
     this.soonMs = null;
     this.scheduler.reset();
     this.clock.reset();
-    this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0 });
+    this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0, changeSuspected: false });
     this.schedule(this.scheduler.initialDelayMs());
   }
 
@@ -120,7 +126,18 @@ export class SyncSession {
     this.soonMs = null;
     if (this.timer !== null) this.clearTimer(this.timer);
     this.timer = null;
-    this.update({ running: false });
+    this.update({ running: false, changeSuspected: false });
+  }
+
+  /**
+   * The rhythm on the mic no longer fits the song (decided locally, no
+   * network). Flag it for the screen and recognize as soon as the clip holds
+   * mostly new audio. `newAudioMs` is how long the new rhythm has already played.
+   */
+  suspectSongChange(newAudioMs: number = 3_000): void {
+    if (!this.snap.running || !this.snap.track || this.snap.changeSuspected) return;
+    this.update({ changeSuspected: true });
+    this.recheckSoon(Math.max(TRIGGER_CONFIG.minEndRecheckMs, this.settleMs - newAudioMs));
   }
 
   /**
@@ -188,7 +205,7 @@ export class SyncSession {
       const d = this.scheduler.onResult({ matched: false });
       if (d.lostLock) {
         this.clock.reset();
-        this.update({ track: null, lyrics: null, lyricsTimeScale: 1, rate: 1 });
+        this.update({ track: null, lyrics: null, lyricsTimeScale: 1, rate: 1, changeSuspected: false });
       }
       this.update({ state: d.state, lastAction: 'miss', error: null, recognitions });
       this.schedule(d.nextDelayMs);
@@ -221,6 +238,7 @@ export class SyncSession {
       lastErrorMs: upd.errorMs,
       error: null,
       recognitions,
+      changeSuspected: false,
     });
     // The song should be over by now: check again once the buffer holds only
     // new audio, instead of waiting out the 20-30s timer.
