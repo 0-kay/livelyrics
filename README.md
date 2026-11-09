@@ -63,17 +63,15 @@ Lyrics are cached in memory (LRU, 500 entries, 24h for hits, 1h for misses; `SER
 
 All of this lives in `shared/src/clock/` and every tuning constant is in `shared/src/clock/config.ts` (see [Tuning constants](#tuning-constants)).
 
-1. Each recognition result becomes a sample `(wallMs, songPosMs)`, placed at the moment the clip's last audio sample was captured. This removes upload, processing and network time from the estimate.
+1. Each recognition result becomes a sample `(wallMs, songPosMs)`, placed at the moment the clip's last audio sample was captured. The server computes the song position at the clip end from ACRCloud's alignment fields (`db_end_time_offset_ms` plus the part of the clip after `sample_end_time_offset_ms`, using the WAV length), which is tighter than `play_offset_ms`; it falls back to `play_offset_ms` when the fields are missing.
 2. The clock follows `songPositionMs = anchorOffsetMs + (now - anchorWallMs) * rate + latencyCompMs`.
-3. `rate` is the slope of a rolling linear regression over the last 16 samples, with outliers (over 900ms off the line) dropped, clamped to 0.7x to 1.4x and smoothed with an EMA.
-4. Drift handling: a sample within 350ms agrees; up to 1500ms off is nudged out gradually (the shown position never jumps or runs backwards); more than 1500ms is held as a suspect and only snaps when the next sample confirms it, so one bad result cannot throw the lyrics off.
-5. Scheduling: recognize every 2s while searching, lock on after 3 agreeing samples once the rate estimate covers 20s, then re-check every 20 to 30s. A nudge or suspect while locked goes back to fast checks; 3 misses in a row drop the song.
-
-6. Early re-checks, so a new song or a drift is noticed in seconds instead of up to 30s later (`TRIGGER_CONFIG` in the same config file):
-   - **Song end:** the clock knows the matched track's length, so a check is scheduled for the end of the song plus the clip length (so the clip holds only new audio).
-   - **Gap in the audio:** `client/src/audio/silence.ts` watches the mic locally (no network). Sound returning after about 1.5s of near-silence triggers a check after the same settle time. The silence level is relative to the recent average, so room noise does not hide a gap.
-   - **Weak match while locked:** a score below `minLockScore` puts the scheduler back on fast checks.
-7. Clip length: each recognition sends only the most recent `CAPTURE_CONFIG.clipSeconds` (default 6) of the rolling buffer. Add `?clip=9` to the page URL (allowed range 3 to 10) to compare lengths on real songs without a rebuild. Shorter clips upload faster and lock sooner but match less reliably in noise.
+3. Speed: 1.0x is assumed until the data clearly shows otherwise (the slope differs by more than 1.2% and 2.5 standard errors), so normal songs never wobble. A steady difference (all answers on one straight line, just not ours) is adopted at once; an adopted speed is refined in small steps, and three answers in a row off to the same side refit it.
+4. Position: the clock sits on the median of the last 7 answers, so one bad answer cannot move it. Differences under 150ms fade out invisibly; larger ones ease in at no more than 5 to 8% speed change over 3 to 8s, and the shown position never runs backwards. A jump (seek, wrong answer) needs three answers that agree with each other before the lyrics move.
+5. Scheduling: check every 1.5s while searching, lock after 2 answers within 600ms, keep the fast pace until about 8s of data can judge the speed, then check every 3 to 3.5s. Each check also watches for a new song, so a change shows in about 4 to 8s even with no gap between songs. Going back to the song just left needs two answers in a row (no flip-flopping in DJ crossfades). 3 misses in a row drop the song.
+6. Early checks (`TRIGGER_CONFIG`): end of the matched song, a gap in the audio (`client/src/audio/silence.ts`), a weak match, and the local rhythm tracker. Trigger checks and the very first check send a shorter 4s clip, which holds new audio sooner. The rhythm tracker only asks for an early check; the screen changes when the server names a different song.
+7. Clip length: routine checks send the last `CAPTURE_CONFIG.clipSeconds` (default 5) of the rolling buffer; add `?clip=N` (3 to 10) to try other lengths. Shorter clips switch songs sooner but match less reliably in noise.
+8. Cost: about 900 to 1,100 recognitions per hour of listening at the default pace (was a few hundred). `lockedMinIntervalMs` and `lockedMaxIntervalMs` in `SCHEDULER_CONFIG` set the pace; 6 to 7s roughly halves the requests and adds about 2s to song switches.
+9. Benchmarks: `client/test/sessionSim.ts` runs the real session against a simulated recognizer (noise, latency, misses, outliers, song changes) and `client/test/sessionBench.test.ts` guards steadiness, accuracy and switch time. `BENCH_OUT=report.json npx vitest run client/test/sessionBench.test.ts` writes the numbers.
 
 The synthetic harness in `shared/test/harness.ts` simulates playback at 0.8x, 0.9x, 1.0x, 1.1x and 1.25x with jitter, outliers, misses, variable latency, seeks and mid-song speed changes.
 
@@ -104,7 +102,7 @@ The UI in `client/src/ui/` follows the Claude Design handoff (`LiveLyrics.dc.htm
 
 - While the clock is locked, it learns the song's tempo at 1.0x (heard BPM divided by the clock rate).
 - Twice a second the client feeds it the learned grid's tempo (`tempoForCrossCheck`), which follows slow DJ pitch rides through the phase-locked loop. The implied rate is that tempo divided by the learned one, with half and double tempo folded.
-- When the implied rate and the clock rate differ by more than 4% for 4s of beat time, it asks for a recognition 1.5s later. Without it, a slow pitch ride is only noticed at the next 20 to 30s re-check. At most one recheck per 10s.
+- When the implied rate and the clock rate differ by more than 4% for 4s of beat time, it asks for a recognition 1.5s later. Without it, a slow pitch ride is noticed at the next regular check (every 3 to 3.5s), so it mainly helps when checks are slowed down to save requests. At most one recheck per 10s.
 - It never moves the clock: recognition offsets stay the source of truth. If two rechecks in a row do not confirm the new rate, the learned tempo is assumed wrong and relearned.
 - No clear beat (a breakdown) pauses the count, and differences above 16% are ignored as tempo errors or another song (the song-change detector handles those).
 
@@ -126,7 +124,7 @@ Every value that changes sync behavior lives in one file, `shared/src/clock/conf
 
 | Group | Controls |
 | --- | --- |
-| `CLOCK_CONFIG` | Rate range (0.7x to 1.4x), regression window, outlier cut, EMA, snap and agree thresholds, nudge shape, default latency compensation |
+| `CLOCK_CONFIG` | Rate range (0.7x to 1.4x), 1.0x prior and significance test, regression window, outlier cut, median anchoring, snap confirmation, deadband and correction speed limits, default latency compensation |
 | `SCHEDULER_CONFIG` | Lock-on rules, search and locked re-check intervals, retry delay, misses before dropping a song |
 | `CAPTURE_CONFIG` | Clip length (and the `?clip=` range), rolling buffer length, wait while the buffer fills |
 | `TRIGGER_CONFIG` | Silence-gap detector, settle margin after a trigger, earliest song-end recheck |
@@ -143,7 +141,7 @@ Purely visual timing (copy rotation, gap rows, palettes) stays next to the UI co
 - **Latency:** `latencyCompMs` defaults to 0. Bluetooth speakers or a far away PA may need a positive value; there is no UI for it yet.
 - **Studio timeline:** rate estimation assumes the recognition provider reports offsets on the original track timeline. Concert mode can re-anchor live performances, but the regular re-checks may still pull the clock back toward the studio timeline.
 - **Recognition is needed to name a song:** the local rhythm can only say that something changed. A perfectly beatmatched DJ transition (same tempo and phase) looks like the same song to rhythm alone.
-- **BPM cross-check only speeds up rechecks:** it never sets the rate, so a pitch change on a track with no clear beat is still found by the regular 20 to 30s re-checks. Sudden pitch jumps over 4% are first caught by the song-change detector, which also triggers a recognition.
+- **BPM cross-check only speeds up rechecks:** it never sets the rate, so a pitch change on a track with no clear beat is still found by the regular checks every 3 to 3.5s. Sudden pitch jumps over 4% are first caught by the song-change detector, which also triggers a recognition.
 - **Concert mode is experimental:** it needs a transcription provider (Whisper in real mode), costs one transcription per 5s, and sung words are hard to transcribe over a loud band.
 - **Cache:** lyrics are cached in memory per server instance. `CACHE_BACKEND=redis` is reserved and falls back to memory.
 - **Mic access** needs HTTPS or `localhost`, and some mobile browsers pause the mic when the screen locks.

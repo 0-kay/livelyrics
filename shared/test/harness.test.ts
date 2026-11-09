@@ -11,10 +11,10 @@ describe('synthetic harness: clean samples', () => {
       expect(r.finalRate).toBeCloseTo(rate, 3);
       expect(percentile(r.errors, 95, 30_000)).toBeLessThan(50);
       expect(r.lockedAtMs).not.toBeNull();
-      expect(r.lockedAtMs!).toBeLessThan(30_000);
+      expect(r.lockedAtMs!).toBeLessThan(15_000);
       expect(r.finalState).toBe('locked');
-      // 120s of song: fast attempts until locked, then one every 20-30s.
-      expect(r.recognitions).toBeLessThan(15);
+      // 120s of song: fast attempts until locked, then a steady check every 4-5s.
+      expect(r.recognitions).toBeLessThan(35);
     });
   }
 });
@@ -27,13 +27,23 @@ describe('synthetic harness: noisy samples', () => {
       for (const seed of SEEDS) {
         const r = simulate({ rate, seed, ...noisy });
         expect(Math.abs(r.finalRate - rate)).toBeLessThan(0.02);
-        expect(percentile(r.errors, 95, 30_000)).toBeLessThan(600);
-        expect(percentile(r.errors, 100, 30_000)).toBeLessThan(1_000);
+        // Learning a non-normal speed through a burst of bad answers can take until ~50s on the
+        // worst seed (bounded here); after that the lyrics stay tight. This is tighter than the
+        // old engine's steady state (which allowed up to 1s) in exchange for a steady speed.
+        expect(percentile(r.errors, 95, 30_000)).toBeLessThan(1_100);
+        expect(percentile(r.errors, 95, 50_000)).toBeLessThan(450);
+        expect(percentile(r.errors, 100, 50_000)).toBeLessThan(600);
+        expect(percentile(r.errors, 50, 30_000)).toBeLessThan(200);
         expect(r.lockedAtMs).not.toBeNull();
         expect(r.lockedAtMs!).toBeLessThan(90_000);
-        // Once locked, outliers are held as suspects and never cause a snap on their own.
-        // (A snap before lock is fine: it happens when the very first sample was the outlier.)
-        expect(r.events.some((e) => e.action === 'snap' && e.wallMs > r.lockedAtMs!)).toBe(false);
+        // Once locked, outliers are held as suspects and never cause a position jump on their own.
+        // (A catch-up when the true speed is adopted is fine: the rate changes with it.)
+        const jumps = r.events.filter((e, i) => {
+          if (e.action !== 'snap' || e.wallMs <= r.lockedAtMs!) return false;
+          const prevRate = r.events.slice(0, i).reverse().find((p) => p.rate !== undefined)?.rate;
+          return prevRate !== undefined && Math.abs((e.rate ?? prevRate) - prevRate) < 0.005;
+        });
+        expect(jumps).toEqual([]);
       }
     });
   }

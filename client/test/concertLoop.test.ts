@@ -138,7 +138,9 @@ describe('ConcertLoop', () => {
     h.loop.start();
     await h.runFor(5_100);
     expect(h.loop.snapshot.lastAction).toBe('pending');
-    await h.runFor(5_700);
+    // This fake recognition advances the simulated clock by 0.8s per call, and recognitions now
+    // run every few seconds, so the next transcription lands a little later than 5s.
+    await h.runFor(6_500);
     expect(h.loop.snapshot.lastAction).toBe('reanchor');
     expect(h.session.positionMs()! - h.truePos()).toBeGreaterThan(39_000);
   });

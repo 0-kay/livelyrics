@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { AcrCloudRecognitionProvider, LrclibLyricsProvider, WhisperTranscriptionProvider } from '../src/providers/index.js';
+import { positionAtClipEnd, wavDurationMs } from '../src/providers/real/acrcloud.js';
 import { jsonResponse } from './helpers.js';
 
 const audio = Buffer.from('fake-audio-bytes');
@@ -103,5 +104,38 @@ describe('WhisperTranscriptionProvider (fake fetch)', () => {
   it('throws on HTTP errors', async () => {
     const p = new WhisperTranscriptionProvider({ apiKey: 'k', fetch: async () => jsonResponse({}, 401) });
     await expect(p.transcribe(audio, 'audio/wav')).rejects.toThrow(/401/);
+  });
+});
+
+describe('ACRCloud clip-end position', () => {
+  /** Minimal 16-bit mono PCM WAV of the given length. */
+  const wav = (ms: number, rate = 16000) => {
+    const data = Math.round((ms / 1000) * rate) * 2;
+    const b = Buffer.alloc(44 + data);
+    b.write('RIFF', 0); b.writeUInt32LE(36 + data, 4); b.write('WAVE', 8);
+    b.write('fmt ', 12); b.writeUInt32LE(16, 16); b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22);
+    b.writeUInt32LE(rate, 24); b.writeUInt32LE(rate * 2, 28); b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34);
+    b.write('data', 36); b.writeUInt32LE(data, 40);
+    return b;
+  };
+  it('reads the WAV length', () => {
+    expect(wavDurationMs(wav(6000))).toBeCloseTo(6000, 0);
+    expect(wavDurationMs(Buffer.from('not a wav'))).toBeNull();
+  });
+  it('maps the matched span to the clip end', () => {
+    // Match ended 280ms before the clip end, at 61.0s in the song: clip end is 61.28s.
+    expect(positionAtClipEnd({ play_offset_ms: 60_700, sample_end_time_offset_ms: 5_720, db_end_time_offset_ms: 61_000 }, 6000)).toBe(61_280);
+  });
+  it('falls back to play_offset_ms when fields are missing or implausible', () => {
+    expect(positionAtClipEnd({ play_offset_ms: 42_000 }, 6000)).toBe(42_000);
+    expect(positionAtClipEnd({ play_offset_ms: 42_000, sample_end_time_offset_ms: 5000, db_end_time_offset_ms: 90_000 }, 6000)).toBe(42_000);
+    expect(positionAtClipEnd({ play_offset_ms: 42_000, sample_end_time_offset_ms: 5000, db_end_time_offset_ms: 41_000 }, null)).toBe(42_000);
+  });
+  it('is what identify returns for a WAV clip', async () => {
+    const p = new AcrCloudRecognitionProvider({
+      host: 'h', accessKey: 'k', accessSecret: 's',
+      fetch: async () => jsonResponse({ status: { code: 0 }, metadata: { music: [{ title: 'T', artists: [{ name: 'A' }], duration_ms: 200000, play_offset_ms: 60_700, sample_end_time_offset_ms: 5_720, db_end_time_offset_ms: 61_000, score: 90 }] } }),
+    });
+    expect((await p.identify(wav(6000), 'audio/wav'))!.playOffsetMs).toBe(61_280);
   });
 });

@@ -12,6 +12,8 @@ import { Stage } from './ui/Stage.js';
 /** Seconds of audio per recognition. Add ?clip=9 to the URL to compare lengths. */
 const CLIP_SECONDS = clipSecondsFromSearch(typeof window === 'undefined' ? '' : window.location.search);
 const SETTLE_MS = CLIP_SECONDS * 1000 + TRIGGER_CONFIG.settleMarginMs;
+/** Settle time for trigger checks, which send the shorter quick clip. */
+const QUICK_SETTLE_MS = Math.min(CLIP_SECONDS, CAPTURE_CONFIG.quickClipSeconds) * 1000 + TRIGGER_CONFIG.settleMarginMs;
 
 /** True when the error means the browser or the user blocked the mic. */
 export function isPermissionError(e: unknown): boolean {
@@ -83,7 +85,9 @@ export function App() {
   useEffect(() => {
     const now = performance.now();
     setDisplay((d) =>
-      reduceDisplay(d, { running: Boolean(snap?.running), track: snap?.track ?? null, lyrics: snap?.lyrics ?? null, suspected: snap?.changeSuspected }, now, lastPosRef.current),
+      // The rhythm hunch only triggers an early check; the screen changes when the server names a
+      // different song (or the song is lost), so it never flips away and back on a false alarm.
+      reduceDisplay(d, { running: Boolean(snap?.running), track: snap?.track ?? null, lyrics: snap?.lyrics ?? null }, now, lastPosRef.current),
     );
     if (snap && snap.recognitions > lastRecognitions.current && snap.lastAction === 'miss') setLastMissAt(now);
     lastRecognitions.current = snap?.recognitions ?? 0;
@@ -138,14 +142,14 @@ export function App() {
       const rec = recorder.current;
       await rec.start();
       const s = new SyncSession({
-        getClip: () => rec.getClip(CLIP_SECONDS),
+        getClip: (seconds) => rec.getClip(seconds ?? CLIP_SECONDS),
         identify: (blob) => identify(blob),
         onChange: setSnap,
         settleMs: SETTLE_MS,
       });
       session.current = s;
       // Sound returning after a gap usually means a new track: check soon.
-      rec.onGapEnd = () => s.recheckSoon(SETTLE_MS);
+      rec.onGapEnd = () => s.recheckSoon(QUICK_SETTLE_MS, true);
       // A different rhythm for 3s straight: move on now, confirm with a check right away.
       rec.onSongChange = () => s.suspectSongChange(RHYTHM_CONFIG.switchAfterMs);
       lastPosRef.current = null;

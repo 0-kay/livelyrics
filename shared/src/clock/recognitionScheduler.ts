@@ -1,4 +1,4 @@
-import { SCHEDULER_CONFIG, type SchedulerConfig } from './config.js';
+import { CLOCK_CONFIG, SCHEDULER_CONFIG, type SchedulerConfig } from './config.js';
 import type { ClockAction } from './playbackClock.js';
 
 /**
@@ -21,6 +21,8 @@ export type RecognitionOutcome =
       songChanged?: boolean;
       /** Wall time covered by the clock's rate estimate. Locking waits for minLockSpanMs. */
       rateSpanMs?: number;
+      /** How far the answer was from the clock (ms). Small nudges still count as agreeing. */
+      errorMs?: number;
     };
 
 export interface SchedulerDecision {
@@ -41,6 +43,8 @@ export class RecognitionScheduler {
   private _state: SyncState = 'searching';
   private streak = 0;
   private misses = 0;
+  /** Wall time covered by the clock's samples for the current song (from the last result). */
+  private rateSpanMs = Infinity;
 
   constructor(opts: { config?: Partial<SchedulerConfig>; random?: () => number } = {}) {
     this.cfg = { ...SCHEDULER_CONFIG, ...opts.config };
@@ -66,12 +70,18 @@ export class RecognitionScheduler {
     }
 
     const good = r.score >= this.cfg.minLockScore;
+    const small = r.errorMs !== undefined && Math.abs(r.errorMs) <= this.cfg.lockToleranceMs;
     switch (r.action) {
       case 'anchor':
       case 'agree':
         this.streak = good ? this.streak + 1 : 0;
         break;
       case 'nudge':
+        if (small) {
+          // A small correction is normal recognition noise, not drift.
+          this.streak = good ? this.streak + 1 : 0;
+          break;
+        }
         this.streak = 0;
         if (this._state === 'locked') this._state = 'drifting';
         break;
@@ -86,6 +96,7 @@ export class RecognitionScheduler {
     // go back to fast checks instead of waiting 20-30s.
     if (!good && this._state === 'locked') this._state = 'drifting';
 
+    this.rateSpanMs = r.songChanged ? (r.rateSpanMs ?? 0) : (r.rateSpanMs ?? this.rateSpanMs);
     const rateReady = (r.rateSpanMs ?? Infinity) >= this.cfg.minLockSpanMs;
     if (this.streak >= this.cfg.samplesToLock && rateReady) this._state = 'locked';
     else if (this._state === 'searching') this._state = 'confirming';
@@ -111,6 +122,8 @@ export class RecognitionScheduler {
 
   private delayFor(state: SyncState): number {
     if (state !== 'locked') return this.cfg.searchIntervalMs;
+    // Right after a song is found, keep the fast pace until there is enough data to judge its speed.
+    if (this.rateSpanMs < CLOCK_CONFIG.minSpanMsForRate) return this.cfg.searchIntervalMs;
     const { lockedMinIntervalMs: lo, lockedMaxIntervalMs: hi } = this.cfg;
     return Math.round(lo + (hi - lo) * this.random());
   }
@@ -119,5 +132,6 @@ export class RecognitionScheduler {
     this._state = 'searching';
     this.streak = 0;
     this.misses = 0;
+    this.rateSpanMs = Infinity;
   }
 }

@@ -21,8 +21,8 @@ export interface SessionClip {
 }
 
 export interface SyncSessionDeps {
-  /** Most recent audio clip, or null if the buffer is not full enough yet. */
-  getClip: () => SessionClip | null;
+  /** Most recent `seconds` of audio (default clip length when omitted), or null if not buffered yet. */
+  getClip: (seconds?: number) => SessionClip | null;
   identify: (clip: Blob) => Promise<IdentifyResponse>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -37,7 +37,12 @@ export interface SyncSessionDeps {
   settleMs?: number;
   /** Override the recognition scheduler (tests use this to make regular checks rare). */
   scheduler?: RecognitionScheduler;
+  /** Clip length for the first check and for checks after a suspected change (s). */
+  quickClipSeconds?: number;
 }
+
+/** Returning to the song we just left within this long needs two answers in a row (ms). */
+const FLIP_BACK_GUARD_MS = 20_000;
 
 export interface SyncSnapshot {
   running: boolean;
@@ -78,6 +83,12 @@ export class SyncSession {
   private inflight = false;
   private soonMs: number | null = null;
   private readonly settleMs: number;
+  private readonly quickClipSeconds: number;
+  /** Use the short clip for the next check (first check, suspected change). */
+  private quickNext = true;
+  /** Song we switched away from, and when, for the flip-back guard. */
+  private previous: { key: string; at: number } | null = null;
+  private pendingBack: string | null = null;
   private generation = 0;
   private readonly bpmCheck = new BpmCrossCheck();
   private bpmKey: string | null = null;
@@ -102,6 +113,7 @@ export class SyncSession {
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
     this.settleMs = deps.settleMs ?? CAPTURE_CONFIG.clipSeconds * 1000 + TRIGGER_CONFIG.settleMarginMs;
+    this.quickClipSeconds = deps.quickClipSeconds ?? CAPTURE_CONFIG.quickClipSeconds;
   }
 
   get snapshot(): SyncSnapshot {
@@ -118,6 +130,9 @@ export class SyncSession {
     this.generation++;
     this.inflight = false;
     this.soonMs = null;
+    this.quickNext = true;
+    this.previous = null;
+    this.pendingBack = null;
     this.scheduler.reset();
     this.clock.reset();
     this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0, changeSuspected: false });
@@ -141,7 +156,10 @@ export class SyncSession {
   suspectSongChange(newAudioMs: number = 3_000): void {
     if (!this.snap.running || !this.snap.track || this.snap.changeSuspected) return;
     this.update({ changeSuspected: true });
-    this.recheckSoon(Math.max(TRIGGER_CONFIG.minEndRecheckMs, this.settleMs - newAudioMs));
+    // A short clip holds mostly new audio sooner.
+    this.quickNext = true;
+    const quickSettle = this.quickClipSeconds * 1000 + TRIGGER_CONFIG.settleMarginMs;
+    this.recheckSoon(Math.max(TRIGGER_CONFIG.minEndRecheckMs, quickSettle - newAudioMs));
   }
 
   /**
@@ -175,8 +193,9 @@ export class SyncSession {
    * Ask for a recognition sooner than the timer would give one, for example
    * after a gap in the audio. Never delays a check that is already due earlier.
    */
-  recheckSoon(ms: number = this.settleMs): void {
+  recheckSoon(ms: number = this.settleMs, quickClip = false): void {
     if (!this.snap.running) return;
+    if (quickClip) this.quickNext = true;
     if (this.inflight) {
       this.soonMs = Math.min(this.soonMs ?? Infinity, ms);
       return;
@@ -209,11 +228,12 @@ export class SyncSession {
   }
 
   private async tick(gen: number): Promise<void> {
-    const clip = this.deps.getClip();
+    const clip = this.deps.getClip(this.quickNext ? this.quickClipSeconds : undefined);
     if (!clip) {
       this.schedule(BUFFER_WAIT_MS);
       return;
     }
+    this.quickNext = false;
     const sentAt = this.now();
     let res: IdentifyResponse;
     this.inflight = true;
@@ -243,8 +263,21 @@ export class SyncSession {
       return;
     }
 
-    const songChanged = !this.snap.track || trackKey(this.snap.track) !== trackKey(res.match);
-    if (songChanged) this.clock.reset();
+    const newKey = trackKey(res.match);
+    const songChanged = !this.snap.track || trackKey(this.snap.track) !== newKey;
+    // During a DJ crossfade answers can alternate between two songs. Going back to the song we
+    // just left needs a second answer in a row, so the screen does not flip back and forth.
+    if (songChanged && this.previous && this.previous.key === newKey && responseAt - this.previous.at < FLIP_BACK_GUARD_MS && this.pendingBack !== newKey) {
+      this.pendingBack = newKey;
+      this.update({ recognitions, lastAction: 'miss', error: null });
+      this.schedule(SCHEDULER_CONFIG.searchIntervalMs);
+      return;
+    }
+    this.pendingBack = null;
+    if (songChanged) {
+      if (this.snap.track) this.previous = { key: trackKey(this.snap.track), at: responseAt };
+      this.clock.reset();
+    }
     const sample = sampleFromRecognition({
       playOffsetMs: res.match.playOffsetMs,
       clipEndWallMs: clip.capturedAtMs,
@@ -258,6 +291,7 @@ export class SyncSession {
       action: upd.action,
       songChanged,
       rateSpanMs: upd.rateSpanMs,
+      errorMs: upd.errorMs,
     });
     this.update({
       state: d.state,

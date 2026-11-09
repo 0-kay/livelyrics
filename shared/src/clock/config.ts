@@ -12,19 +12,45 @@ export const CLOCK_CONFIG = {
   /** Minimum samples before the regression produces a rate. */
   minSamplesForRate: 3,
   /** Minimum wall-clock span (ms) covered by the samples before trusting a slope. */
-  minSpanMsForRate: 6_000,
+  minSpanMsForRate: 8_000,
+  /** Shorter span allowed when every answer sits on one line at another speed (ms). */
+  minSpanMsForRateChange: 6_000,
   /** Samples whose residual exceeds this (ms) are dropped as outliers before refitting. */
   outlierResidualMs: 900,
   /** EMA smoothing factor for the rate (0..1, higher reacts faster). */
-  rateEmaAlpha: 0.5,
+  rateEmaAlpha: 0.4,
+  /**
+   * 1.0x is assumed until a measured rate differs from it by more than this
+   * and by rateSigmas standard errors. An adopted rate is held the same way.
+   */
+  minRateDeviation: 0.012,
+  rateSigmas: 2.5,
+  holdSigmas: 1.5,
+  /** This many answers in a row off to the same side, by more than driftErrorMs on average, refit the rate. */
+  driftSamples: 3,
+  driftErrorMs: 250,
+  /** Recent samples whose median places the clock (robust to a single bad answer). */
+  anchorSamples: 7,
   /** Disagreement (ms) above which the clock snaps instead of nudging. */
   snapThresholdMs: 1_500,
+  /**
+   * A snap needs this many consecutive answers that disagree with the clock
+   * but agree with each other, so a pair of bad answers cannot move the lyrics.
+   */
+  snapConfirmSamples: 3,
   /** Disagreement (ms) below which a sample is treated as agreeing with the clock. */
   agreeThresholdMs: 350,
-  /** A nudge is spread over at least this long (ms). */
-  nudgeMinDurationMs: 1_500,
-  /** A nudge never changes the effective rate by more than this fraction. */
-  nudgeMaxRateDelta: 0.35,
+  /** A correction is spread over at least this long (ms). */
+  nudgeMinDurationMs: 3_000,
+  /** ... and at most this long, so larger errors are fixed within seconds (ms). */
+  nudgeMaxDurationMs: 8_000,
+  /** A correction changes the shown speed by at most this fraction (barely visible). */
+  nudgeMaxRateDelta: 0.08,
+  /** ... and small corrections (under smallNudgeMs) by at most this. */
+  smallNudgeRateDelta: 0.05,
+  smallNudgeMs: 400,
+  /** Corrections smaller than this fade over the longest window, below what anyone can see (ms). */
+  deadbandMs: 150,
   /** Fixed acoustic or pipeline latency added to every position (ms). */
   defaultLatencyCompMs: 0,
 } as const;
@@ -33,20 +59,30 @@ export const SCHEDULER_CONFIG = {
   /** Provider score (0-100) required to count a sample toward lock-on. */
   minLockScore: 50,
   /** Consecutive agreeing samples needed to lock on. */
-  samplesToLock: 3,
+  samplesToLock: 2,
   /**
-   * The rate estimate must cover at least this much wall time (ms) before
-   * locking. Must stay below (regressionWindow - 1) * searchIntervalMs or a
-   * fast connection could never lock.
+   * An answer within this of the clock counts as agreeing for lock-on, and a
+   * correction this small does not count as drifting (ms). Recognition answers
+   * are rarely more precise than a few hundred ms.
    */
-  minLockSpanMs: 20_000,
+  lockToleranceMs: 600,
+  /**
+   * The agreeing samples must cover at least this much wall time (ms) before
+   * locking, so two answers from nearly the same audio do not lock on their own.
+   * 1.0x is assumed until proven otherwise, so this no longer waits for a rate.
+   */
+  minLockSpanMs: 2_000,
   /** Delay between attempts while searching or confirming (ms). */
-  searchIntervalMs: 2_000,
-  /** Re-check interval range once locked (ms). A random value in this range is used. */
-  lockedMinIntervalMs: 20_000,
-  lockedMaxIntervalMs: 30_000,
+  searchIntervalMs: 1_500,
+  /**
+   * Re-check interval range once locked (ms). Checking every few seconds keeps
+   * the position steady and notices a new song within seconds. Each check is
+   * one recognition request: about 800 per hour of listening at 4-5s.
+   */
+  lockedMinIntervalMs: 3_000,
+  lockedMaxIntervalMs: 3_500,
   /** Delay after a no-match while locked or confirming (ms). */
-  retryIntervalMs: 4_000,
+  retryIntervalMs: 2_000,
   /** Consecutive no-matches after which we drop the lock and start over. */
   maxMisses: 3,
 } as const;
@@ -57,7 +93,12 @@ export const SCHEDULER_CONFIG = {
  */
 export const CAPTURE_CONFIG = {
   /** Seconds of the most recent audio sent per recognition. Override with ?clip=N in the URL. */
-  clipSeconds: 6,
+  clipSeconds: 5,
+  /**
+   * Shorter clip for the very first check (lyrics sooner) and for checks
+   * triggered by a suspected song change (the clip is mostly new audio sooner).
+   */
+  quickClipSeconds: 4,
   /** Allowed range for the clip length override. */
   minClipSeconds: 3,
   maxClipSeconds: 10,

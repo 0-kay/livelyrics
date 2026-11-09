@@ -75,7 +75,7 @@ function harness(opts: {
 }
 
 describe('SyncSession', () => {
-  it('locks on to a 1.1x track and then backs off', async () => {
+  it('locks on to a 1.1x track and then keeps a steady check cadence', async () => {
     const h = harness({ rate: 1.1 });
     h.session.start();
     await h.runFor(40_000);
@@ -84,9 +84,9 @@ describe('SyncSession', () => {
     expect(h.session.positionMs()).toBeCloseTo(30_000 + h.getNow() * 1.1, -1);
     const callsAtLock = h.calls();
     await h.runFor(60_000);
-    // Locked: at most one re-check every 20-30s.
-    expect(h.calls() - callsAtLock).toBeLessThanOrEqual(3);
-    expect(h.calls() - callsAtLock).toBeGreaterThanOrEqual(2);
+    // Locked: one check every 3-3.5s (plus the 1s simulated latency), so about 14-15 a minute.
+    expect(h.calls() - callsAtLock).toBeLessThanOrEqual(16);
+    expect(h.calls() - callsAtLock).toBeGreaterThanOrEqual(12);
   });
 
   it('keeps going through server errors and reports them', async () => {
@@ -196,10 +196,11 @@ describe('SyncSession', () => {
     const before = h.calls();
     h.session.suspectSongChange(3_000);
     expect(h.session.snapshot.changeSuspected).toBe(true);
-    // Settle is 7s; 3s of new audio already played, so the check is due in 4s, not 100s.
-    await h.runFor(3_500);
+    // A quick 4s clip settles in 4.7s; 3s of new audio already played, so the check is due in
+    // about 1.7s, not 100s.
+    await h.runFor(1_500);
     expect(h.calls()).toBe(before);
-    await h.runFor(2_000);
+    await h.runFor(1_000);
     expect(h.calls()).toBe(before + 1);
     // Same song came back: the flag clears.
     expect(h.session.snapshot.changeSuspected).toBe(false);

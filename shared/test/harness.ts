@@ -59,6 +59,10 @@ export interface SimEvent {
   action: ClockAction | 'miss';
   state: SyncState;
   errorMs: number;
+  /** Clock rate after this event. */
+  rate?: number;
+  /** Clock target minus truth right after this event (ms). */
+  targetErrMs?: number;
 }
 
 export interface SimResult {
@@ -123,7 +127,9 @@ export function simulate(o: SimOptions): SimResult {
       if (decision.lostLock) clock.reset();
     } else {
       let reported = truth(clipEnd) + gaussian(rand) * noise;
-      if (rand() < (o.outlierProb ?? 0)) reported += (rand() < 0.5 ? -1 : 1) * (o.outlierMagnitudeMs ?? 4_000);
+      // Wrong answers land at scattered places (0.5x to 1.5x the magnitude, either sign), so
+      // two of them rarely agree with each other the way a real seek would.
+      if (rand() < (o.outlierProb ?? 0)) reported += (rand() < 0.5 ? -1 : 1) * (o.outlierMagnitudeMs ?? 4_000) * (0.5 + rand());
       const sample = sampleFromRecognition({
         playOffsetMs: reported,
         clipEndWallMs: clipEnd,
@@ -131,8 +137,8 @@ export function simulate(o: SimOptions): SimResult {
         responseWallMs: responseAt,
       });
       const upd = clock.addSample(sample, responseAt);
-      decision = scheduler.onResult({ matched: true, score: 90, action: upd.action, rateSpanMs: upd.rateSpanMs });
-      events.push({ wallMs: responseAt, action: upd.action, state: decision.state, errorMs: upd.errorMs });
+      decision = scheduler.onResult({ matched: true, score: 90, action: upd.action, rateSpanMs: upd.rateSpanMs, errorMs: upd.errorMs });
+      events.push({ wallMs: responseAt, action: upd.action, state: decision.state, errorMs: upd.errorMs, rate: clock.rate, targetErrMs: clock.targetAt(responseAt) - truth(responseAt) });
     }
     if (decision.state === 'locked' && lockedAtMs === null) lockedAtMs = responseAt;
     nextClipEnd = responseAt + decision.nextDelayMs;

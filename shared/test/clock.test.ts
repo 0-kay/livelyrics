@@ -112,7 +112,24 @@ describe('AdaptivePlaybackClock', () => {
     const mid = c.positionAt(5_000 + 1_000)! - (before + 1_000);
     expect(mid).toBeGreaterThan(0);
     expect(mid).toBeLessThan(800);
-    expect(c.positionAt(20_000)).toBeCloseTo(14_800 + 16_000, 0); // fully on the corrected line
+    // One answer moves the clock to the median of the answers so far (here the mean of the two),
+    // so a single noisy answer cannot drag the lyrics all the way.
+    expect(c.positionAt(20_000)).toBeCloseTo((14_000 + 14_800) / 2 + 16_000, 0);
+  });
+
+  it('ignores a single noisy answer once a few agree (median anchoring)', () => {
+    const c = new AdaptivePlaybackClock();
+    for (let i = 0; i < 4; i++) c.addSample({ wallMs: i * 4_000, songPosMs: 10_000 + i * 4_000 }, i * 4_000 + 1_000);
+    c.addSample({ wallMs: 16_000, songPosMs: 26_000 + 900 }, 17_000); // one answer 900ms off
+    expect(c.positionAt(30_000)).toBeCloseTo(10_000 + 30_000, -1);
+  });
+
+  it('adopts a steady speed difference instead of snapping back and forth', () => {
+    const c = new AdaptivePlaybackClock();
+    const actions: string[] = [];
+    for (let i = 0; i < 6; i++) actions.push(c.addSample({ wallMs: i * 3_000, songPosMs: 20_000 + i * 3_000 * 1.1 }, i * 3_000 + 1_000).action);
+    expect(c.rate).toBeCloseTo(1.1, 3);
+    expect(actions.filter((a) => a === 'snap' || a === 'suspect')).toEqual([]);
   });
 
   it('never moves backwards while nudging toward an earlier position', () => {
@@ -135,14 +152,24 @@ describe('AdaptivePlaybackClock', () => {
     expect(c.addSample({ wallMs: 6_000, songPosMs: 16_050 }, 7_000).action).toBe('agree');
   });
 
-  it('snaps when two samples confirm a jump', () => {
+  it('snaps when three answers confirm a jump, and never on two', () => {
     const c = new AdaptivePlaybackClock();
     c.addSample({ wallMs: 0, songPosMs: 10_000 }, 0);
     expect(c.addSample({ wallMs: 3_000, songPosMs: 60_000 }, 4_000).action).toBe('suspect');
-    const u = c.addSample({ wallMs: 6_000, songPosMs: 63_000 }, 7_000);
+    expect(c.addSample({ wallMs: 6_000, songPosMs: 63_000 }, 7_000).action).toBe('suspect');
+    const u = c.addSample({ wallMs: 9_000, songPosMs: 66_000 }, 10_000);
     expect(u.action).toBe('snap');
-    expect(c.positionAt(7_000)).toBeCloseTo(64_000, 0);
+    expect(c.positionAt(10_000)).toBeCloseTo(67_000, 0);
     expect(c.isNudging).toBe(false);
+  });
+
+  it('does not let two agreeing bad answers move the clock', () => {
+    const c = new AdaptivePlaybackClock();
+    for (let i = 0; i < 3; i++) c.addSample({ wallMs: i * 4_000, songPosMs: 10_000 + i * 4_000 }, i * 4_000 + 500);
+    expect(c.addSample({ wallMs: 12_000, songPosMs: 26_000 }, 12_500).action).toBe('suspect');
+    expect(c.addSample({ wallMs: 16_000, songPosMs: 30_000 }, 16_500).action).toBe('suspect');
+    expect(c.addSample({ wallMs: 20_000, songPosMs: 30_000 }, 20_500).action).toBe('agree');
+    expect(c.positionAt(24_000)).toBeCloseTo(34_000, -2);
   });
 
   it('learns the rate from samples', () => {
@@ -163,24 +190,41 @@ describe('AdaptivePlaybackClock', () => {
 describe('tuning constants', () => {
   it('can always reach the lock span inside the regression window', () => {
     expect(SCHEDULER_CONFIG.minLockSpanMs).toBeLessThan((CLOCK_CONFIG.regressionWindow - 1) * SCHEDULER_CONFIG.searchIntervalMs);
-    expect(CLOCK_CONFIG.minSpanMsForRate).toBeLessThanOrEqual(SCHEDULER_CONFIG.minLockSpanMs);
+    expect(CLOCK_CONFIG.minSpanMsForRateChange).toBeLessThanOrEqual(CLOCK_CONFIG.minSpanMsForRate);
+    // The regression window must hold enough steady checks to learn a rate.
+    expect((CLOCK_CONFIG.regressionWindow - 1) * SCHEDULER_CONFIG.lockedMaxIntervalMs).toBeGreaterThan(CLOCK_CONFIG.minSpanMsForRate);
     expect(SCHEDULER_CONFIG.lockedMinIntervalMs).toBeLessThanOrEqual(SCHEDULER_CONFIG.lockedMaxIntervalMs);
   });
 });
 
 describe('RecognitionScheduler', () => {
-  const agree = { matched: true as const, score: 90, action: 'agree' as const, rateSpanMs: SCHEDULER_CONFIG.minLockSpanMs };
+  const agree = { matched: true as const, score: 90, action: 'agree' as const, rateSpanMs: CLOCK_CONFIG.minSpanMsForRate };
 
-  it('locks after enough agreeing samples, then backs off to 20-30s', () => {
+  it('locks after two agreeing samples, then keeps checking every few seconds', () => {
     const s = new RecognitionScheduler({ random: () => 0.5 });
-    expect(s.onResult({ ...agree, action: 'anchor', rateSpanMs: 0 })).toMatchObject({ state: 'confirming', nextDelayMs: 2_000 });
-    expect(s.onResult(agree).state).toBe('confirming');
+    expect(s.onResult({ ...agree, action: 'anchor', rateSpanMs: 0 })).toMatchObject({ state: 'confirming', nextDelayMs: SCHEDULER_CONFIG.searchIntervalMs });
     const d = s.onResult(agree);
     expect(d.state).toBe('locked');
-    expect(d.nextDelayMs).toBe(25_000);
+    expect(d.nextDelayMs).toBe((SCHEDULER_CONFIG.lockedMinIntervalMs + SCHEDULER_CONFIG.lockedMaxIntervalMs) / 2);
   });
 
-  it('uses the full 20-30s range', () => {
+  it('keeps the fast pace after a match until the speed can be judged', () => {
+    const s = new RecognitionScheduler({ random: () => 0.5 });
+    s.onResult({ ...agree, action: 'anchor', rateSpanMs: 0, songChanged: true });
+    const early = s.onResult({ ...agree, rateSpanMs: SCHEDULER_CONFIG.minLockSpanMs });
+    expect(early.state).toBe('locked');
+    expect(early.nextDelayMs).toBe(SCHEDULER_CONFIG.searchIntervalMs);
+    expect(s.onResult({ ...agree, rateSpanMs: CLOCK_CONFIG.minSpanMsForRate }).nextDelayMs).toBeGreaterThanOrEqual(SCHEDULER_CONFIG.lockedMinIntervalMs);
+  });
+
+  it('counts a small correction as agreeing, a large one as drift', () => {
+    const s = new RecognitionScheduler();
+    s.onResult({ ...agree, action: 'anchor', rateSpanMs: 0 });
+    expect(s.onResult({ ...agree, action: 'nudge', errorMs: 450 }).state).toBe('locked');
+    expect(s.onResult({ ...agree, action: 'nudge', errorMs: 900 }).state).toBe('drifting');
+  });
+
+  it('uses the full locked interval range', () => {
     for (const r of [0, 0.999]) {
       const s = new RecognitionScheduler({ random: () => r });
       [1, 2, 3].forEach(() => s.onResult(agree));
@@ -205,7 +249,7 @@ describe('RecognitionScheduler', () => {
   it('goes to drifting on a nudge or suspect while locked', () => {
     const s = new RecognitionScheduler();
     [1, 2, 3].forEach(() => s.onResult(agree));
-    expect(s.onResult({ ...agree, action: 'nudge' })).toMatchObject({ state: 'drifting', nextDelayMs: 2_000 });
+    expect(s.onResult({ ...agree, action: 'nudge' })).toMatchObject({ state: 'drifting', nextDelayMs: SCHEDULER_CONFIG.searchIntervalMs });
     [1, 2, 3].forEach(() => s.onResult(agree));
     expect(s.state).toBe('locked');
     expect(s.onResult({ ...agree, action: 'suspect' }).state).toBe('drifting');
@@ -223,10 +267,10 @@ describe('RecognitionScheduler', () => {
   it('drops the lock after repeated misses', () => {
     const s = new RecognitionScheduler();
     [1, 2, 3].forEach(() => s.onResult(agree));
-    expect(s.onResult({ matched: false })).toMatchObject({ state: 'drifting', nextDelayMs: 4_000, lostLock: false });
+    expect(s.onResult({ matched: false })).toMatchObject({ state: 'drifting', nextDelayMs: SCHEDULER_CONFIG.retryIntervalMs, lostLock: false });
     s.onResult({ matched: false });
     expect(s.onResult({ matched: false })).toMatchObject({ state: 'searching', lostLock: true });
-    expect(s.onResult({ matched: false })).toMatchObject({ state: 'searching', nextDelayMs: 2_000, lostLock: false });
+    expect(s.onResult({ matched: false })).toMatchObject({ state: 'searching', nextDelayMs: SCHEDULER_CONFIG.searchIntervalMs, lostLock: false });
   });
 
   it('restarts confirmation when the song changes', () => {

@@ -72,7 +72,10 @@ export class AdaptivePlaybackClock {
   private residualMs = 0;
   private residualStartWallMs = 0;
   private residualDurationMs = 0;
-  private pendingSnap: ClockSample | null = null;
+  /** Consecutive large disagreements that agree with each other (a seek in progress, or bad answers). */
+  private pendingSnaps: ClockSample[] = [];
+  /** Recent answer errors (ms), to spot a held rate that is consistently wrong. */
+  private recentErrors: number[] = [];
 
   constructor(opts: AdaptiveClockOptions = {}) {
     this.cfg = { ...CLOCK_CONFIG, ...opts.config };
@@ -85,6 +88,9 @@ export class AdaptivePlaybackClock {
       emaAlpha: this.cfg.rateEmaAlpha,
       minRate: this.cfg.minRate,
       maxRate: this.cfg.maxRate,
+      minRateDeviation: this.cfg.minRateDeviation,
+      rateSigmas: this.cfg.rateSigmas,
+      holdSigmas: this.cfg.holdSigmas,
     });
   }
 
@@ -139,27 +145,71 @@ export class AdaptivePlaybackClock {
 
     const errorMs = sample.songPosMs - this.targetAt(sample.wallMs);
 
+    // Off, but on one straight line with the earlier answers: the song plays at another speed
+    // than we assumed (DJ pitch, slowed edit). Adopt that rate now instead of treating it as a seek.
+    if (Math.abs(errorMs) > this.cfg.agreeThresholdMs) {
+      // Earlier answers held as suspects may have been the new speed showing, so they count too.
+      const free = this.estimator.freeFitWith(sample, this.cfg.minSpanMsForRateChange, this.pendingSnaps);
+      const slope = free ? Math.min(this.cfg.maxRate, Math.max(this.cfg.minRate, free.slope)) : null;
+      if (
+        free && slope !== null &&
+        free.maxResidualMs <= this.cfg.agreeThresholdMs * 2 &&
+        Math.abs(slope - this.currentRate) > Math.max(this.cfg.minRateDeviation, this.cfg.rateSigmas * free.slopeSe)
+      ) {
+        const held = this.pendingSnaps;
+        this.pendingSnaps = [];
+        const displayedBefore = this.targetAt(nowMs) + this.residualAt(nowMs);
+        for (const h of held) this.estimator.add(h);
+        this.estimator.add(sample);
+        const rate = this.estimator.adopt(slope);
+        this.setTarget(free.slope * sample.wallMs + free.intercept, sample.wallMs, rate);
+        const residual = displayedBefore - this.targetAt(nowMs);
+        if (Math.abs(residual) > this.cfg.snapThresholdMs) {
+          this.clearResidual();
+          return { action: 'snap', errorMs, rate, rateSpanMs: this.estimator.spanMs };
+        }
+        this.startResidual(residual, nowMs, true);
+        return { action: 'nudge', errorMs, rate, rateSpanMs: this.estimator.spanMs };
+      }
+    }
+
     if (Math.abs(errorMs) > this.cfg.snapThresholdMs) {
-      const pending = this.pendingSnap;
-      if (pending && this.confirms(pending, sample)) {
-        // Two samples agree with each other but not with us: a seek or a big mistake.
-        this.pendingSnap = null;
+      const last = this.pendingSnaps[this.pendingSnaps.length - 1];
+      if (last && !this.confirms(last, sample)) this.pendingSnaps = [];
+      this.pendingSnaps.push(sample);
+      if (this.pendingSnaps.length >= this.cfg.snapConfirmSamples) {
+        // Several answers agree with each other but not with us: a real seek or jump.
+        const confirmed = this.pendingSnaps;
+        this.pendingSnaps = [];
         this.estimator.reset({ keepRate: true });
-        this.estimator.add(pending);
-        const rate = this.estimator.add(sample) ?? this.currentRate;
-        this.setTarget(sample.songPosMs, sample.wallMs, rate);
+        let rate = this.currentRate;
+        for (const c of confirmed) rate = this.estimator.add(c) ?? rate;
+        const anchorPos = this.estimator.medianAnchor(sample.wallMs, rate, this.cfg.anchorSamples) ?? sample.songPosMs;
+        this.setTarget(anchorPos, sample.wallMs, rate);
         this.clearResidual();
         return { action: 'snap', errorMs, rate, rateSpanMs: this.estimator.spanMs };
       }
-      this.pendingSnap = sample;
       return { action: 'suspect', errorMs, rate: this.currentRate, rateSpanMs: this.estimator.spanMs };
     }
 
-    this.pendingSnap = null;
+    this.pendingSnaps = [];
     const displayedBefore = this.targetAt(nowMs) + this.residualAt(nowMs);
-    const rate = this.estimator.add(sample) ?? this.currentRate;
-    // Anchor the new target on the regression line when available (less noisy than one sample).
-    const anchorPos = this.estimator.predict(sample.wallMs) ?? sample.songPosMs;
+    let rate = this.estimator.add(sample) ?? this.currentRate;
+    // Several answers in a row off to the same side: the held rate is wrong, refit it now.
+    this.recentErrors = [...this.recentErrors, errorMs].slice(-this.cfg.driftSamples);
+    const e = this.recentErrors;
+    if (
+      e.length === this.cfg.driftSamples &&
+      (e.every((x) => x > 0) || e.every((x) => x < 0)) &&
+      e.reduce((a, x) => a + Math.abs(x), 0) / e.length > this.cfg.driftErrorMs
+    ) {
+      const slope = this.estimator.freeSlope(this.cfg.minSpanMsForRateChange);
+      if (slope !== null && Math.abs(slope - rate) > this.cfg.minRateDeviation) rate = this.estimator.adopt(slope);
+      this.recentErrors = [];
+    }
+    // Place the clock on the median of the recent answers at the held rate: one bad answer cannot move it.
+    // A real speed difference is caught above and adopted, so the held rate does not bias this for long.
+    const anchorPos = this.estimator.medianAnchor(sample.wallMs, rate, this.cfg.anchorSamples) ?? sample.songPosMs;
     this.setTarget(anchorPos, sample.wallMs, rate);
 
     const residual = displayedBefore - this.targetAt(nowMs);
@@ -176,7 +226,7 @@ export class AdaptivePlaybackClock {
   reanchor(sample: ClockSample, nowMs: number): ClockUpdate {
     if (!this.anchored) return this.addSample(sample, nowMs);
     const errorMs = sample.songPosMs - this.targetAt(sample.wallMs);
-    this.pendingSnap = null;
+    this.pendingSnaps = [];
     this.estimator.reset({ keepRate: true });
     this.estimator.add(sample);
     this.setTarget(sample.songPosMs, sample.wallMs, this.currentRate);
@@ -195,14 +245,24 @@ export class AdaptivePlaybackClock {
     return advanced >= dt * this.cfg.minRate - tol && advanced <= dt * this.cfg.maxRate + tol;
   }
 
-  private startResidual(residualMs: number, nowMs: number) {
+  /** fast: catch up after adopting a new rate (eased over 1.5-4s, up to 20% speed). */
+  private startResidual(residualMs: number, nowMs: number, fast = false) {
     if (Math.abs(residualMs) < 1) {
       this.clearResidual();
       return;
     }
     this.residualMs = residualMs;
     this.residualStartWallMs = nowMs;
-    this.residualDurationMs = Math.max(this.cfg.nudgeMinDurationMs, Math.abs(residualMs) / this.cfg.nudgeMaxRateDelta);
+    // Tiny differences fade over the longest window (invisible); larger ones at most ~8% speed change,
+    // but never take longer than nudgeMaxDurationMs.
+    if (fast) {
+      this.residualDurationMs = Math.min(4_000, Math.max(1_500, Math.abs(residualMs) / 0.2));
+      return;
+    }
+    const abs = Math.abs(residualMs);
+    const maxDelta = abs < this.cfg.smallNudgeMs ? this.cfg.smallNudgeRateDelta : this.cfg.nudgeMaxRateDelta;
+    const d = abs < this.cfg.deadbandMs ? this.cfg.nudgeMaxDurationMs : abs / maxDelta;
+    this.residualDurationMs = Math.min(this.cfg.nudgeMaxDurationMs, Math.max(this.cfg.nudgeMinDurationMs, d));
   }
 
   private clearResidual() {
@@ -214,7 +274,8 @@ export class AdaptivePlaybackClock {
   reset(): void {
     this.anchored = false;
     this.currentRate = 1;
-    this.pendingSnap = null;
+    this.pendingSnaps = [];
+    this.recentErrors = [];
     this.clearResidual();
     this.estimator.reset();
   }
