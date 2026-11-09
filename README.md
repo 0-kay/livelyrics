@@ -7,7 +7,7 @@ Listens to music through the mic, identifies the song, and shows synced lyrics w
 ```
 shared/   Types, provider interfaces, LRC parser, line search, adaptive clock (used by both sides)
 server/   Fastify API: /api/health, /api/identify (recognition + lyrics + cache + duration scaling)
-client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), re-recognition loop, lyrics player
+client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), re-recognition loop, karaoke screen (client/src/ui)
 ```
 
 ## Requirements
@@ -77,9 +77,19 @@ All of this lives in `shared/src/clock/` and every tuning constant is in `shared
 
 The synthetic harness in `shared/test/harness.ts` simulates playback at 0.8x, 0.9x, 1.0x, 1.1x and 1.25x with jitter, outliers, misses, variable latency, seeks and mid-song speed changes.
 
+## The karaoke screen
+
+The UI in `client/src/ui/` follows the Claude Design handoff (`LiveLyrics.dc.html`). `Stage.tsx` draws every state from the live session: idle, mic blocked, listening (ring fills while the first clip is captured, then a scanning sweep and rotating copy, with a nudge after 15s), the match reveal with confetti, lyrics with a sweep bar under the current line, your-turn dots on blank rows, the next-song hand-off, instrumental and no-lyrics screens. The motion math is pure and tested (`lyricsLayout.ts`, `listenCopy.ts`, `displaySong.ts`); tokens and palettes are in `theme.ts`.
+
+- Each song gets one of six palettes from a hash of its title and artist, and the background blends to it over about 1 second. Listening uses the Night palette.
+- When the session drops a song, the last lyrics stay on screen, dimmed, under "Ooh, next song? I'm on it!" until the next match. The new lyrics rise in while the old ones fade up.
+- Long gaps (12s or more) and intros get a blank row so the dot countdown always has a place.
+- Wide landscape screens (1100px or wider) switch to the TV scale. The screen button turns on party mode: full screen, and the controls hide after 3 seconds without interaction.
+- Dark theme by default; add `?theme=light` for the light theme. Reduced motion follows the system setting. The screen stays awake while listening where the browser supports it.
+
 ## Concert mode (experimental)
 
-Set `CONCERT_MODE=on` on the server (real mode also needs `OPENAI_API_KEY`). The client then shows a "Concert mode" toggle. While a song is known, it transcribes the latest 5s every 5s and the server fuzzy-matches the words against lyric spans of one to three lines within 30s before and 45s after the clock position (`shared/src/concert/matcher.ts`, a fuzzy substring edit distance with no extra dependencies). The clock only moves when the match is confident: score at least 0.72, no other place in the window within 0.08 of it, more than 2.5s away from the clock, and for jumps over 15s a second consistent match (`ReanchorPolicy`). In mock mode the transcription mock follows the same virtual song as the recognition mock, so the toggle can be tried without keys.
+Set `CONCERT_MODE=on` on the server (real mode also needs `OPENAI_API_KEY`). The client then shows a small LIVE toggle next to Stop, and a quiet caption with the words it just heard. While a song is known, it transcribes the latest 5s every 5s and the server fuzzy-matches the words against lyric spans of one to three lines within 30s before and 45s after the clock position (`shared/src/concert/matcher.ts`, a fuzzy substring edit distance with no extra dependencies). The clock only moves when the match is confident: score at least 0.72, no other place in the window within 0.08 of it, more than 2.5s away from the clock, and for jumps over 15s a second consistent match (`ReanchorPolicy`). In mock mode the transcription mock follows the same virtual song as the recognition mock, so the toggle can be tried without keys.
 
 ## Docker and Cloud Run
 

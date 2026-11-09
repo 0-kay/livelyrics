@@ -3,7 +3,7 @@ import { FloatRingBuffer } from '../src/audio/ringBuffer.js';
 import { SilenceGapDetector } from '../src/audio/silence.js';
 import { clipSecondsFromSearch } from '../src/config.js';
 import { downsample, encodeWav } from '../src/audio/wav.js';
-import { formatMs } from '../src/lyrics/LyricsPlayer.js';
+import { formatSeconds } from '../src/ui/theme.js';
 
 const f = (...xs: number[]) => Float32Array.from(xs);
 
@@ -67,10 +67,10 @@ describe('encodeWav', () => {
   });
 });
 
-describe('LyricsPlayer helpers', () => {
+describe('position clock', () => {
   it('formats positions', () => {
-    expect(formatMs(65_400)).toBe('1:05');
-    expect(formatMs(-5)).toBe('0:00');
+    expect(formatSeconds(65.4)).toBe('1:05');
+    expect(formatSeconds(-5)).toBe('0:00');
   });
 });
 

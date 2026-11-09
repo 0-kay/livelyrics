@@ -1,22 +1,51 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CAPTURE_CONFIG, CONCERT_CONFIG, TRIGGER_CONFIG, type SyncState } from '@livelyrics/shared';
+import { CAPTURE_CONFIG, CONCERT_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
 import { health, identify, transcribe } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
 import { clipSecondsFromSearch } from './config.js';
-import { LyricsPlayer } from './lyrics/LyricsPlayer.js';
 import { ConcertLoop, type ConcertSnapshot } from './sync/concertLoop.js';
 import { SyncSession, type SyncSnapshot } from './sync/syncSession.js';
+import { reduceDisplay, type DisplaySong } from './ui/displaySong.js';
+import { Stage } from './ui/Stage.js';
 
 /** Seconds of audio per recognition. Add ?clip=9 to the URL to compare lengths. */
 const CLIP_SECONDS = clipSecondsFromSearch(typeof window === 'undefined' ? '' : window.location.search);
 const SETTLE_MS = CLIP_SECONDS * 1000 + TRIGGER_CONFIG.settleMarginMs;
 
-export const STATE_LABEL: Record<SyncState, string> = {
-  searching: 'Listening',
-  confirming: 'Syncing',
-  locked: 'Locked',
-  drifting: 'Drifting',
-};
+/** True when the error means the browser or the user blocked the mic. */
+export function isPermissionError(e: unknown): boolean {
+  const name = e instanceof Error || (typeof e === 'object' && e !== null) ? String((e as { name?: unknown }).name ?? '') : '';
+  const msg = e instanceof Error ? e.message : String(e);
+  return name === 'NotAllowedError' || name === 'SecurityError' || /permission|denied|not allowed/i.test(msg);
+}
+
+/** Keeps the screen on while listening, where the browser supports it. */
+function useWakeLock(on: boolean) {
+  useEffect(() => {
+    if (!on || typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+    let lock: WakeLockSentinel | null = null;
+    let cancelled = false;
+    const acquire = () => {
+      navigator.wakeLock
+        .request('screen')
+        .then((l) => {
+          if (cancelled) void l.release();
+          else lock = l;
+        })
+        .catch(() => {});
+    };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') acquire();
+    };
+    acquire();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      void lock?.release().catch(() => {});
+    };
+  }, [on]);
+}
 
 export function App() {
   const recorder = useRef(new MicRecorder({ bufferSeconds: CAPTURE_CONFIG.bufferSeconds }));
@@ -24,11 +53,15 @@ export function App() {
   const concert = useRef<ConcertLoop | null>(null);
   const [snap, setSnap] = useState<SyncSnapshot | null>(null);
   const [concertSnap, setConcertSnap] = useState<ConcertSnapshot | null>(null);
-  const [startError, setStartError] = useState<string | null>(null);
+  const [startError, setStartError] = useState<{ denied: boolean; message: string } | null>(null);
   const [mode, setMode] = useState<string>('');
   const [concertAvailable, setConcertAvailable] = useState(false);
   const [concertOn, setConcertOn] = useState(false);
-  const [buffered, setBuffered] = useState(0);
+  const [startedAt, setStartedAt] = useState(0);
+  const [lastMissAt, setLastMissAt] = useState<number | null>(null);
+  const [display, setDisplay] = useState<DisplaySong | null>(null);
+  const lastPosRef = useRef<{ key: string; posMs: number } | null>(null);
+  const lastRecognitions = useRef(0);
 
   useEffect(() => {
     health()
@@ -45,12 +78,13 @@ export function App() {
     };
   }, []);
 
-  // Show buffer progress until the first clip is ready.
+  // Track the song on screen and empty checks from each session snapshot.
   useEffect(() => {
-    if (!snap?.running || snap.recognitions > 0) return;
-    const id = setInterval(() => setBuffered(recorder.current.bufferedSeconds()), 200);
-    return () => clearInterval(id);
-  }, [snap?.running, snap?.recognitions]);
+    const now = performance.now();
+    setDisplay((d) => reduceDisplay(d, { running: Boolean(snap?.running), track: snap?.track ?? null, lyrics: snap?.lyrics ?? null }, now, lastPosRef.current));
+    if (snap && snap.recognitions > lastRecognitions.current && snap.lastAction === 'miss') setLastMissAt(now);
+    lastRecognitions.current = snap?.recognitions ?? 0;
+  }, [snap]);
 
   // Concert loop runs only while listening with the flag available and the toggle on.
   useEffect(() => {
@@ -93,10 +127,13 @@ export function App() {
       session.current = s;
       // Sound returning after a gap usually means a new track: check soon.
       rec.onGapEnd = () => s.recheckSoon(SETTLE_MS);
+      lastPosRef.current = null;
+      setLastMissAt(null);
+      setStartedAt(performance.now());
       s.start();
     } catch (e) {
       await recorder.current.stop();
-      setStartError(e instanceof Error ? e.message : String(e));
+      setStartError({ denied: isPermissionError(e), message: e instanceof Error ? e.message : String(e) });
     }
   }, []);
 
@@ -107,69 +144,33 @@ export function App() {
     setSnap(null);
   }, []);
 
-  const getPositionMs = useCallback(() => session.current?.positionMs() ?? 0, []);
+  const getPositionMs = useCallback(() => session.current?.positionMs() ?? null, []);
+  const bufferedSeconds = useCallback(() => recorder.current.bufferedSeconds(), []);
   const running = Boolean(snap?.running);
-  const track = snap?.track ?? null;
-  const lyrics = snap?.lyrics ?? null;
+  useWakeLock(running);
 
   return (
-    <main className="app">
-      <header className="topbar">
-        <div className="brand">
-          <h1>LiveLyrics</h1>
-          {mode && <span className="mode">{mode} mode</span>}
-        </div>
-        <button className="listen" onClick={running ? stop : listen} aria-pressed={running}>
-          {running ? 'Stop' : 'Listen'}
-        </button>
-      </header>
-
-      <section className="controls">
-        {running && track ? (
-          <div className="track">
-            <p className="title">{track.title}</p>
-            <p className="artist">{track.artist}</p>
-          </div>
-        ) : (
-          <p className="status" role="status">
-            {!running && !startError && 'Tap Listen and hold your device near the music.'}
-            {startError && `Could not start the mic: ${startError}`}
-            {running && snap?.recognitions === 0 && `Listening ${buffered.toFixed(0)}s of ${CLIP_SECONDS}s`}
-            {running && (snap?.recognitions ?? 0) > 0 && 'No match yet. Keep the device near the speaker.'}
-          </p>
-        )}
-        {running && snap && (
-          <p
-            className={`sync sync-${snap.state}`}
-            aria-live="polite"
-            data-state={snap.state}
-            data-action={snap.lastAction ?? ''}
-            data-error-ms={Math.round(snap.lastErrorMs)}
-            data-recognitions={snap.recognitions}
-          >
-            <span className="dot" aria-hidden="true" />
-            <span className="label">{STATE_LABEL[snap.state]}</span>
-            {track && <span className="rate">{snap.rate.toFixed(2)}x</span>}
-            {snap.error && <span className="err">retrying ({snap.error})</span>}
-          </p>
-        )}
-        {concertAvailable && (
-          <label className="concert-toggle">
-            <input type="checkbox" checked={concertOn} onChange={(e) => setConcertOn(e.target.checked)} />
-            Concert mode (experimental)
-          </label>
-        )}
-        {concertSnap?.running && (
-          <p className="concert-status" data-action={concertSnap.lastAction ?? ''} data-reanchors={concertSnap.reanchors}>
-            {concertSnap.lastText ? `Heard: "${concertSnap.lastText}"` : 'Listening for sung words'}
-            {concertSnap.reanchors > 0 && ` · re-anchored ${concertSnap.reanchors}x`}
-          </p>
-        )}
-      </section>
-
-      {track && lyrics && !lyrics.instrumental && <LyricsPlayer lines={lyrics.lines} getPositionMs={getPositionMs} />}
-      {track && lyrics?.instrumental && <p className="note">This track is instrumental.</p>}
-      {track && !lyrics && <p className="note">No synced lyrics found for this track.</p>}
+    <main>
+      <Stage
+        running={running}
+        startError={startError}
+        startedAt={startedAt}
+        clipSeconds={CLIP_SECONDS}
+        bufferedSeconds={bufferedSeconds}
+        recognitions={snap?.recognitions ?? 0}
+        lastMissAt={lastMissAt}
+        syncState={snap?.state ?? 'searching'}
+        rate={snap?.rate ?? 1}
+        offline={Boolean(snap?.error)}
+        display={display}
+        getPositionMs={getPositionMs}
+        lastPosRef={lastPosRef}
+        concert={{ available: concertAvailable, on: concertOn, lastText: concertSnap?.running ? concertSnap.lastText : null }}
+        demoMode={mode === 'mock'}
+        onListen={listen}
+        onStop={stop}
+        onToggleConcert={() => setConcertOn((v) => !v)}
+      />
     </main>
   );
 }
