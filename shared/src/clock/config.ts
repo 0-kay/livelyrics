@@ -63,6 +63,8 @@ export const CAPTURE_CONFIG = {
   maxClipSeconds: 10,
   /** Rolling mic buffer length in seconds. Must be at least maxClipSeconds. */
   bufferSeconds: 10,
+  /** Wait this long before trying again when the mic buffer is not full yet (ms). */
+  bufferWaitMs: 300,
 } as const;
 
 export const TRIGGER_CONFIG = {
@@ -171,4 +173,46 @@ export const RHYTHM_CONFIG = {
   predictBeats: 10,
   /** Large light flashes never exceed this rate (photosensitivity). */
   maxFlashHz: 3,
+  /** Visual pulses fire this much before a predicted beat, to cover screen latency (ms). */
+  visualLeadMs: 30,
+} as const;
+
+/**
+ * BPM cross-check (shared/src/clock/bpmCheck.ts): compares the clock rate with
+ * the playback rate implied by the local tempo tracker and asks for an early
+ * recognition when they disagree. Never moves the clock on its own.
+ */
+export const BPM_CHECK_CONFIG = {
+  /** Relative disagreement between the implied rate and the clock rate that counts as a mismatch. */
+  tolerance: 0.04,
+  /** The mismatch must add up to this long, counting only readings with a clear beat, before a recheck (ms). */
+  holdMs: 4_000,
+  /** At most one recheck per this interval (ms). */
+  cooldownMs: 10_000,
+  /** Rechecks in one disagreement before the learned tempo is relearned from the clock. */
+  maxRechecks: 2,
+  /**
+   * Disagreements larger than this are ignored: more likely a tempo octave
+   * error or another song (the song-change detector handles that) than a DJ pitch fader.
+   */
+  maxDeviation: 0.16,
+  /** Implied rates outside this range are ignored too. */
+  minRate: CLOCK_CONFIG.minRate,
+  maxRate: CLOCK_CONFIG.maxRate,
+  /** A gap between two readings counts for at most this long (ms), so a stalled tab cannot fire at once. */
+  maxStepMs: 1_000,
+  /** How often the client feeds the cross-check (ms). */
+  intervalMs: 500,
+} as const;
+
+/** Server side: lyrics cache and upload limits (server/src/app.ts, cache.ts). */
+export const SERVER_CONFIG = {
+  /** Lyrics cache size (entries) before the least recently used is evicted. */
+  cacheMaxEntries: 500,
+  /** How long found lyrics stay cached (ms). */
+  cacheHitTtlMs: 24 * 60 * 60 * 1000,
+  /** How long a "no lyrics found" result stays cached (ms), so a later upload to LRCLIB is picked up. */
+  cacheMissTtlMs: 60 * 60 * 1000,
+  /** Largest accepted audio upload (bytes). Vercel caps request bodies lower, see server/src/vercel.ts. */
+  maxUploadBytes: 5 * 1024 * 1024,
 } as const;

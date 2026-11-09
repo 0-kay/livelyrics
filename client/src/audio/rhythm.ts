@@ -271,10 +271,20 @@ export class SongChangeDetector {
   }
 }
 
+/**
+ * Tempo to feed the BPM cross-check: the learned grid's tempo (it follows slow
+ * rides through the phase-locked loop) while the rhythm is on that grid, else
+ * null so breakdowns and a possible new song stay neutral.
+ */
+export function tempoForCrossCheck(s: ChangeSnapshot | null): number | null {
+  if (!s || s.state !== 'tracking' || s.verdict !== 'on' || s.refBpm === null) return null;
+  return s.refBpm;
+}
+
 export type Energy = 'calm' | 'groove' | 'hype';
 
 /** Visual pulses fire this much before a predicted beat (ms). */
-export const VISUAL_LEAD_MS = 30;
+export const VISUAL_LEAD_MS = RHYTHM_CONFIG.visualLeadMs;
 
 export interface BeatFrame {
   /** 1 on a beat, decaying to 0 (about 160ms). */

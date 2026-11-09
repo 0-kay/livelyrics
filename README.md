@@ -6,8 +6,8 @@ Listens to music through the mic, identifies the song, and shows synced lyrics w
 
 ```
 shared/   Types, provider interfaces, LRC parser, line search, adaptive clock (used by both sides)
-server/   Fastify API: /api/health, /api/identify (recognition + lyrics + cache + duration scaling)
-client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), re-recognition loop, karaoke screen (client/src/ui)
+server/   Fastify API: /api/health, /api/identify (recognition + lyrics + cache + duration scaling), /api/transcribe (concert mode)
+client/   React + Vite app: mic capture (rolling 10s buffer, 16 kHz WAV upload), re-recognition loop, beat tracking, karaoke screen (client/src/ui)
 ```
 
 ## Requirements
@@ -34,7 +34,7 @@ Copy `.env.example` to `.env` (never commit it), set `PROVIDER_MODE=real`, and f
 | --- | --- | --- |
 | ACRCloud | Song recognition | `ACRCLOUD_HOST`, `ACRCLOUD_ACCESS_KEY`, `ACRCLOUD_ACCESS_SECRET` |
 | LRCLIB | Synced lyrics (no key, personal use only) | `LRCLIB_USER_AGENT` |
-| OpenAI Whisper | Concert mode transcription (later milestone) | `OPENAI_API_KEY` |
+| OpenAI Whisper | Concert mode transcription (only with `CONCERT_MODE=on`) | `OPENAI_API_KEY` |
 
 The server reads env vars from the process environment, for example `set -a; source .env; set +a; npm run dev:server`. In real mode the server refuses to start and lists any missing ACRCloud variables.
 
@@ -57,11 +57,11 @@ Real providers are tested against a fake `fetch`, so the suite never touches the
 
 - `POST /api/transcribe` (only when `CONCERT_MODE=on` and a transcription provider exists, otherwise 404) takes multipart form data with optional text fields `title`, `artist`, `album`, `durationMs`, `positionMs` followed by an `audio` file. It returns `{ text, match, processingMs }`. With a track, `match` is the best lyric line for the transcript near `positionMs` (`lineIndex`, `startMs`, `positionMs`, `score`, `ambiguous`, `confident`), matched on the same scaled timeline that `/api/identify` returned.
 
-Lyrics are cached in memory (LRU, 24h for hits, 1h for misses). `CACHE_BACKEND=redis` is reserved for later and currently falls back to memory.
+Lyrics are cached in memory (LRU, 500 entries, 24h for hits, 1h for misses; `SERVER_CONFIG`). `CACHE_BACKEND=redis` is reserved for later and currently falls back to memory.
 
 ## How syncing works
 
-All of this lives in `shared/src/clock/` and every tuning constant is in `shared/src/clock/config.ts`.
+All of this lives in `shared/src/clock/` and every tuning constant is in `shared/src/clock/config.ts` (see [Tuning constants](#tuning-constants)).
 
 1. Each recognition result becomes a sample `(wallMs, songPosMs)`, placed at the moment the clip's last audio sample was captured. This removes upload, processing and network time from the estimate.
 2. The clock follows `songPositionMs = anchorOffsetMs + (now - anchorWallMs) * rate + latencyCompMs`.
@@ -98,6 +98,16 @@ The UI in `client/src/ui/` follows the Claude Design handoff (`LiveLyrics.dc.htm
 - **Limits:** naming the new song still needs one recognition. A perfectly beatmatched DJ transition (same tempo and phase) looks like the same song to rhythm alone; those changes still come from the song-end, silence-gap and regular checks.
 - Add `?debug=1` to the URL to see tempo, the learned grid, the on-grid share and the mismatch timer live.
 
+## BPM cross-check
+
+`shared/src/clock/bpmCheck.ts` (`BPM_CHECK_CONFIG`) compares the clock rate with the rate the local tempo implies. It uses the tempo tracker above instead of Essentia.js, so it adds no dependency and no extra audio processing.
+
+- While the clock is locked, it learns the song's tempo at 1.0x (heard BPM divided by the clock rate).
+- Twice a second the client feeds it the learned grid's tempo (`tempoForCrossCheck`), which follows slow DJ pitch rides through the phase-locked loop. The implied rate is that tempo divided by the learned one, with half and double tempo folded.
+- When the implied rate and the clock rate differ by more than 4% for 4s of beat time, it asks for a recognition 1.5s later. Without it, a slow pitch ride is only noticed at the next 20 to 30s re-check. At most one recheck per 10s.
+- It never moves the clock: recognition offsets stay the source of truth. If two rechecks in a row do not confirm the new rate, the learned tempo is assumed wrong and relearned.
+- No clear beat (a breakdown) pauses the count, and differences above 16% are ignored as tempo errors or another song (the song-change detector handles those).
+
 ## Concert mode (experimental)
 
 Set `CONCERT_MODE=on` on the server (real mode also needs `OPENAI_API_KEY`). The client then shows a small LIVE toggle next to Stop, and a quiet caption with the words it just heard. While a song is known, it transcribes the latest 5s every 5s and the server fuzzy-matches the words against lyric spans of one to three lines within 30s before and 45s after the clock position (`shared/src/concert/matcher.ts`, a fuzzy substring edit distance with no extra dependencies). The clock only moves when the match is confident: score at least 0.72, no other place in the window within 0.08 of it, more than 2.5s away from the clock, and for jumps over 15s a second consistent match (`ReanchorPolicy`). In mock mode the transcription mock follows the same virtual song as the recognition mock, so the toggle can be tried without keys.
@@ -110,8 +120,31 @@ See `DEPLOY.md`: Vercel (import the repo, add the keys and an `ACCESS_PASSWORD`)
 
 `docker build -t livelyrics . && docker run --rm -p 8080:8080 livelyrics` runs the API and the built client in one container (mock mode by default). See `DEPLOY.md` for Cloud Run notes. Nothing is deployed automatically.
 
-## Current limitations
+## Tuning constants
 
-- `latencyCompMs` defaults to 0. Bluetooth speakers or a far away PA may need a positive value; there is no UI for it yet.
-- Rate estimation assumes the recognition provider reports offsets on the original track timeline. Concert mode can re-anchor live performances, but the regular re-checks may still pull the clock back toward the studio timeline.
-- LRCLIB is for personal use. A public product would need a licensed lyrics provider.
+Every value that changes sync behavior lives in one file, `shared/src/clock/config.ts`, used by both the server and the client. Each constant has a comment there; the groups are:
+
+| Group | Controls |
+| --- | --- |
+| `CLOCK_CONFIG` | Rate range (0.7x to 1.4x), regression window, outlier cut, EMA, snap and agree thresholds, nudge shape, default latency compensation |
+| `SCHEDULER_CONFIG` | Lock-on rules, search and locked re-check intervals, retry delay, misses before dropping a song |
+| `CAPTURE_CONFIG` | Clip length (and the `?clip=` range), rolling buffer length, wait while the buffer fills |
+| `TRIGGER_CONFIG` | Silence-gap detector, settle margin after a trigger, earliest song-end recheck |
+| `SCALING_CONFIG` | When to apply duration-ratio scaling and its limits |
+| `CONCERT_CONFIG` | Transcription chunk length and interval, search window, fuzzy score and margin, re-anchor and confirmation rules |
+| `RHYTHM_CONFIG` | Onset detector, tempo range, grid learning and checking, song-change timing, beat prediction, flash cap, visual lead |
+| `BPM_CHECK_CONFIG` | Tolerance, hold time, cooldown and recheck count for the BPM cross-check |
+| `SERVER_CONFIG` | Lyrics cache size and lifetimes, upload size limit |
+
+Purely visual timing (copy rotation, gap rows, palettes) stays next to the UI code in `client/src/ui/` because it does not affect sync.
+
+## Known limitations
+
+- **Latency:** `latencyCompMs` defaults to 0. Bluetooth speakers or a far away PA may need a positive value; there is no UI for it yet.
+- **Studio timeline:** rate estimation assumes the recognition provider reports offsets on the original track timeline. Concert mode can re-anchor live performances, but the regular re-checks may still pull the clock back toward the studio timeline.
+- **Recognition is needed to name a song:** the local rhythm can only say that something changed. A perfectly beatmatched DJ transition (same tempo and phase) looks like the same song to rhythm alone.
+- **BPM cross-check only speeds up rechecks:** it never sets the rate, so a pitch change on a track with no clear beat is still found by the regular 20 to 30s re-checks. Sudden pitch jumps over 4% are first caught by the song-change detector, which also triggers a recognition.
+- **Concert mode is experimental:** it needs a transcription provider (Whisper in real mode), costs one transcription per 5s, and sung words are hard to transcribe over a loud band.
+- **Cache:** lyrics are cached in memory per server instance. `CACHE_BACKEND=redis` is reserved and falls back to memory.
+- **Mic access** needs HTTPS or `localhost`, and some mobile browsers pause the mic when the screen locks.
+- **Lyrics licensing:** LRCLIB is for personal use. A public product would need a licensed lyrics provider (for example Musixmatch).

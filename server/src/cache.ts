@@ -1,3 +1,5 @@
+import { SERVER_CONFIG } from '@livelyrics/shared';
+
 /** Minimal async cache interface so Redis or Firestore can be swapped in later. */
 export interface Cache<V> {
   get(key: string): Promise<V | undefined>;
@@ -9,8 +11,8 @@ export class MemoryLruCache<V> implements Cache<V> {
   private readonly map = new Map<string, { value: V; expiresAt: number }>();
 
   constructor(
-    private readonly maxEntries = 500,
-    private readonly defaultTtlMs = 24 * 60 * 60 * 1000,
+    private readonly maxEntries: number = SERVER_CONFIG.cacheMaxEntries,
+    private readonly defaultTtlMs: number = SERVER_CONFIG.cacheHitTtlMs,
     private readonly now: () => number = Date.now,
   ) {}
 

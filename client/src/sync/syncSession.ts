@@ -1,5 +1,7 @@
 import {
   AdaptivePlaybackClock,
+  BpmCrossCheck,
+  type BpmCheckStatus,
   RecognitionScheduler,
   SCHEDULER_CONFIG,
   CAPTURE_CONFIG,
@@ -56,7 +58,7 @@ export interface SyncSnapshot {
 }
 
 /** Wait this long when the mic buffer is not full yet (ms). */
-const BUFFER_WAIT_MS = 300;
+const BUFFER_WAIT_MS = CAPTURE_CONFIG.bufferWaitMs;
 
 const trackKey = (t: TrackMatch) => `${t.artist.trim().toLowerCase()}|${t.title.trim().toLowerCase()}`;
 
@@ -77,6 +79,8 @@ export class SyncSession {
   private soonMs: number | null = null;
   private readonly settleMs: number;
   private generation = 0;
+  private readonly bpmCheck = new BpmCrossCheck();
+  private bpmKey: string | null = null;
   private snap: SyncSnapshot = {
     running: false,
     state: 'searching',
@@ -138,6 +142,33 @@ export class SyncSession {
     if (!this.snap.running || !this.snap.track || this.snap.changeSuspected) return;
     this.update({ changeSuspected: true });
     this.recheckSoon(Math.max(TRIGGER_CONFIG.minEndRecheckMs, this.settleMs - newAudioMs));
+  }
+
+  /**
+   * BPM cross-check: feed the locally tracked tempo of the song on the mic
+   * (null when there is no clear beat). If it implies a playback rate that
+   * disagrees with the clock for a few seconds (a DJ moved the pitch fader),
+   * a recognition is pulled forward so the rate catches up. The clock itself
+   * only ever moves on recognition results.
+   */
+  checkTempo(bpm: number | null): BpmCheckStatus {
+    const t = this.snap.track;
+    if (!this.snap.running || !t || this.snap.changeSuspected) {
+      if (!t) {
+        this.bpmCheck.reset();
+        this.bpmKey = null;
+      }
+      return 'idle';
+    }
+    const key = trackKey(t);
+    if (key !== this.bpmKey) {
+      this.bpmCheck.reset();
+      this.bpmKey = key;
+    }
+    const r = this.bpmCheck.update({ nowMs: this.now(), bpm, clockRate: this.snap.rate, locked: this.snap.state === 'locked' });
+    // The new rate has been playing for the hold time already, so any fresh clip shows it.
+    if (r.status === 'recheck') this.recheckSoon(TRIGGER_CONFIG.minEndRecheckMs);
+    return r.status;
   }
 
   /**

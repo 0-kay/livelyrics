@@ -1,4 +1,4 @@
-import type { ProviderMode } from '@livelyrics/shared';
+import { SERVER_CONFIG, type ProviderMode } from '@livelyrics/shared';
 
 export interface AppConfig {
   mode: ProviderMode;
@@ -41,7 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     lrclibUserAgent: empty(env.LRCLIB_USER_AGENT) ?? 'livelyrics/0.1 (https://github.com/0-kay/livelyrics)',
     openaiApiKey: empty(env.OPENAI_API_KEY),
-    maxUploadBytes: 5 * 1024 * 1024,
+    maxUploadBytes: SERVER_CONFIG.maxUploadBytes,
     mockPlaybackRate: parseRate(env.MOCK_PLAYBACK_RATE),
     staticDir: empty(env.STATIC_DIR),
     concertMode: parseFlag(env.CONCERT_MODE, 'CONCERT_MODE'),

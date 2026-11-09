@@ -212,4 +212,39 @@ describe('SyncSession', () => {
     h.session.suspectSongChange();
     expect(h.session.snapshot.changeSuspected).toBe(false);
   });
+
+  it('checkTempo pulls a recognition forward when the local tempo says the rate changed', async () => {
+    const h = harness({ scheduler: slowScheduler() });
+    h.session.start();
+    // Before any match the cross-check does nothing.
+    expect(h.session.checkTempo(120)).toBe('idle');
+    await h.runFor(40_000);
+    expect(h.session.snapshot.state).toBe('locked');
+    expect(h.session.checkTempo(120)).toBe('relearned');
+    const before = h.calls();
+    // Same tempo for 20s: no extra checks (regular ones are 100s apart).
+    for (let i = 0; i < 40; i++) {
+      await h.runFor(500);
+      h.session.checkTempo(120);
+    }
+    expect(h.calls()).toBe(before);
+    // Tempo up 8% while the clock still says 1.0x: a check comes within the hold time plus 1.5s.
+    const statuses: string[] = [];
+    for (let i = 0; i < 14; i++) {
+      await h.runFor(500);
+      statuses.push(h.session.checkTempo(129.6));
+    }
+    expect(statuses).toContain('recheck');
+    await h.runFor(2_000);
+    expect(h.calls()).toBeGreaterThan(before);
+  });
+
+  it('checkTempo stays quiet while a song change is suspected', async () => {
+    const h = harness({ scheduler: slowScheduler() });
+    h.session.start();
+    await h.runFor(40_000);
+    h.session.checkTempo(120);
+    h.session.suspectSongChange(3_000);
+    expect(h.session.checkTempo(150)).toBe('idle');
+  });
 });

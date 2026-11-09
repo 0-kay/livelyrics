@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BeatDetector, type Onset } from '../src/audio/beat.js';
-import { gridError, predictBeats, RhythmWatch } from '../src/audio/rhythm.js';
+import { BpmCrossCheck } from '@livelyrics/shared';
+import { gridError, predictBeats, RhythmWatch, tempoForCrossCheck } from '../src/audio/rhythm.js';
 
 const SR = 48_000;
 
@@ -210,5 +211,52 @@ describe('beat frame', () => {
     expect(off.pulse).toBeLessThan(0.2);
     expect(on.bpm).toBeGreaterThan(118);
     expect(on.next.length).toBe(10);
+  });
+});
+
+describe('BPM cross-check on synthetic drums', () => {
+  /** Run a track with the clock locked at 1.0x from `lockS`; returns times (ms) the cross-check asked for a recheck. */
+  function rechecks(segments: Segment[], lockS = 10) {
+    const { audio } = synth(segments);
+    const w = new RhythmWatch(SR);
+    const check = new BpmCrossCheck();
+    const out: number[] = [];
+    let armed = false;
+    let lastFeed = 0;
+    feed(audio, w, (t) => {
+      if (!armed && t >= 2_000) {
+        armed = true;
+        w.change.arm('song-a');
+      }
+      if (t - lastFeed >= 500) {
+        lastFeed = t;
+        const r = check.update({ nowMs: t, bpm: tempoForCrossCheck(w.change.snapshot), clockRate: 1, locked: t >= lockS * 1000 });
+        if (r.status === 'recheck') out.push(t);
+      }
+    });
+    return out;
+  }
+
+  it('never asks for a recheck on a steady song', () => {
+    expect(rechecks([{ fromS: 0, toS: 45, bpm: 120, hats: true }])).toHaveLength(0);
+  });
+
+  it('asks for a recheck during a slow DJ pitch ride the song-change detector follows', () => {
+    // 120 to 130 BPM (about +8%) over 30s, after the tempo was learned at 1.0x.
+    const r = rechecks([
+      { fromS: 0, toS: 15, bpm: 120, hats: true },
+      { fromS: 15, toS: 45, bpm: 120, bpmEnd: 130, hats: true },
+    ]);
+    expect(r.length).toBeGreaterThan(0);
+    expect(r[0]!).toBeGreaterThan(15_000);
+  });
+
+  it('stays neutral through a breakdown with no drums', () => {
+    const r = rechecks([
+      { fromS: 0, toS: 16, bpm: 120, hats: true },
+      { fromS: 16, toS: 28, bpm: 120, pad: true },
+      { fromS: 28, toS: 45, bpm: 120, hats: true },
+    ]);
+    expect(r).toHaveLength(0);
   });
 });

@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import {
+  SERVER_CONFIG,
   durationScale,
   matchTranscript,
   type LyricsQuery,
@@ -61,7 +62,7 @@ export function lyricsCacheKey(m: Pick<TrackMatch, 'title' | 'artist' | 'duratio
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
-  const maxUploadBytes = deps.maxUploadBytes ?? 5 * 1024 * 1024;
+  const maxUploadBytes = deps.maxUploadBytes ?? SERVER_CONFIG.maxUploadBytes;
   const lyricsCache = deps.lyricsCache ?? new MemoryLruCache<SyncedLyrics | null>();
   const app = Fastify({ logger: deps.logger ?? false });
 
@@ -90,7 +91,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         durationMs: q.durationMs || undefined,
       });
       // Cache misses for a shorter time so newly added lyrics show up.
-      await lyricsCache.set(key, lyrics, lyrics ? undefined : 60 * 60 * 1000);
+      await lyricsCache.set(key, lyrics, lyrics ? undefined : SERVER_CONFIG.cacheMissTtlMs);
       return { lyrics, cached: false };
     } catch (err) {
       log.warn({ err }, 'lyrics lookup failed');

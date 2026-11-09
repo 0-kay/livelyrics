@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CAPTURE_CONFIG, CONCERT_CONFIG, RHYTHM_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
+import { BPM_CHECK_CONFIG, CAPTURE_CONFIG, CONCERT_CONFIG, RHYTHM_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
 import { health, identify, transcribe } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
+import { tempoForCrossCheck } from './audio/rhythm.js';
 import { clipSecondsFromSearch } from './config.js';
 import { ConcertLoop, type ConcertSnapshot } from './sync/concertLoop.js';
 import { SyncSession, type SyncSnapshot } from './sync/syncSession.js';
@@ -94,6 +95,15 @@ export function App() {
     if (displayKey) recorder.current.armRhythm(displayKey);
     else recorder.current.disarmRhythm();
   }, [displayKey]);
+
+  // BPM cross-check: the local tempo pulls a recognition forward when it says the playback rate moved.
+  useEffect(() => {
+    if (!snap?.running) return;
+    const id = setInterval(() => {
+      session.current?.checkTempo(tempoForCrossCheck(recorder.current.rhythmSnapshot()));
+    }, BPM_CHECK_CONFIG.intervalMs);
+    return () => clearInterval(id);
+  }, [snap?.running]);
 
   // Concert loop runs only while listening with the flag available and the toggle on.
   useEffect(() => {
