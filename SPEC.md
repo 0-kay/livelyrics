@@ -45,7 +45,7 @@ songPositionMs = anchorOffsetMs + (now - anchorWallMs) * rate + latencyCompMs
 - `rate` comes from a rolling linear regression over the last N samples, clamped to [0.7, 1.4], smoothed with an EMA.
 - Disagreement with the clock > 1500ms: snap and animate scroll. Smaller: nudge gradually.
 - Current line found by binary search on `startMs`.
-- Stop recognizing once locked on (confidence high and drift low). Re-check every 20-30s.
+- Once locked on, keep a steady re-check every 3 to 3.5s (changed from 20-30s on 2026-11-09 for faster song switches and a steadier clock; see README, How syncing works).
 
 ## Slowed/sped versions
 If the matched track duration differs from the LRCLIB entry duration, scale timestamps by `matchedDuration / lyricsDuration`.

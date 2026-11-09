@@ -60,7 +60,7 @@ gcloud run deploy livelyrics \
 ## Things to know
 
 - The lyrics cache is in memory per instance. It is lost on scale-down and not shared between instances. A Redis (Memorystore) or Firestore backend can go behind the existing `Cache` interface later.
-- Each client re-recognizes every 2s until locked, then every 20-30s. Budget ACRCloud requests accordingly; `--max-instances` caps cost from abuse.
+- Each client recognizes every 1.5s until locked, then every 3 to 3.5s (about 1,000 requests per hour of listening). Budget ACRCloud requests accordingly; `--max-instances` caps cost from abuse.
 - Uploads are capped at 5 MB per clip. A 9s 16 kHz mono WAV is about 290 KB.
 - `--allow-unauthenticated` makes the app public. LRCLIB is for personal use only, so keep the service private (drop that flag and use IAM or IAP) unless you switch to a licensed lyrics provider.
 - Health check: `GET /api/health`.
