@@ -102,6 +102,10 @@ The UI in `client/src/ui/` follows the Claude Design handoff (`LiveLyrics.dc.htm
 
 Set `CONCERT_MODE=on` on the server (real mode also needs `OPENAI_API_KEY`). The client then shows a small LIVE toggle next to Stop, and a quiet caption with the words it just heard. While a song is known, it transcribes the latest 5s every 5s and the server fuzzy-matches the words against lyric spans of one to three lines within 30s before and 45s after the clock position (`shared/src/concert/matcher.ts`, a fuzzy substring edit distance with no extra dependencies). The clock only moves when the match is confident: score at least 0.72, no other place in the window within 0.08 of it, more than 2.5s away from the clock, and for jumps over 15s a second consistent match (`ReanchorPolicy`). In mock mode the transcription mock follows the same virtual song as the recognition mock, so the toggle can be tried without keys.
 
+## Deploying
+
+See `DEPLOY.md`: Vercel (import the repo, add the keys and an `ACCESS_PASSWORD`) or Cloud Run (`scripts/deploy-cloudrun.sh`). Set `ACCESS_PASSWORD` on any deployed copy so only you can use it.
+
 ## Docker and Cloud Run
 
 `docker build -t livelyrics . && docker run --rm -p 8080:8080 livelyrics` runs the API and the built client in one container (mock mode by default). See `DEPLOY.md` for Cloud Run notes. Nothing is deployed automatically.

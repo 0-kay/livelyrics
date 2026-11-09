@@ -1,5 +1,6 @@
 import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
+import { timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -29,6 +30,26 @@ export interface AppDeps {
   staticDir?: string;
   /** Concert mode feature flag. POST /api/transcribe exists only when on and a transcription provider is set. */
   concertMode?: boolean;
+  /**
+   * When set, every page and API call (except /api/health) needs this
+   * password through the browser's sign-in prompt (HTTP Basic, any user name).
+   * Keeps a deployed copy personal.
+   */
+  accessPassword?: string;
+}
+
+/** True when the Authorization header carries the password (Basic auth, user name ignored). */
+export function passwordMatches(header: string | undefined, password: string): boolean {
+  if (!header || !header.startsWith('Basic ')) return false;
+  let decoded: string;
+  try {
+    decoded = Buffer.from(header.slice(6).trim(), 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  const given = Buffer.from(decoded.slice(decoded.indexOf(':') + 1));
+  const want = Buffer.from(password);
+  return given.length === want.length && timingSafeEqual(given, want);
 }
 
 const ALLOWED_MIME = /^(audio\/(wav|x-wav|wave|webm|ogg|mp4|mpeg|aac|x-m4a)|video\/webm)(;.*)?$/i;
@@ -45,6 +66,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({ logger: deps.logger ?? false });
 
   const concertMode = Boolean(deps.concertMode && deps.providers.transcription);
+  if (deps.accessPassword) {
+    const password = deps.accessPassword;
+    app.addHook('onRequest', async (req, reply) => {
+      if (req.url === '/api/health' || passwordMatches(req.headers.authorization, password)) return;
+      return reply.code(401).header('WWW-Authenticate', 'Basic realm="LiveLyrics", charset="UTF-8"').send({ error: 'Password required' });
+    });
+  }
   await app.register(multipart, { limits: { fileSize: maxUploadBytes, files: 1, fields: 10, fieldSize: 1024 } });
 
   app.get('/api/health', async (): Promise<HealthResponse> => ({ ok: true, mode: deps.mode, concertMode }));

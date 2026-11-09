@@ -15,6 +15,8 @@ export interface AppConfig {
   staticDir?: string;
   /** Concert mode feature flag (experimental). Enables POST /api/transcribe. */
   concertMode: boolean;
+  /** Password for the browser sign-in prompt; unset means open (fine for localhost). */
+  accessPassword?: string;
 }
 
 const empty = (v: string | undefined) => (v && v.trim() ? v.trim() : undefined);
@@ -43,6 +45,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     mockPlaybackRate: parseRate(env.MOCK_PLAYBACK_RATE),
     staticDir: empty(env.STATIC_DIR),
     concertMode: parseFlag(env.CONCERT_MODE, 'CONCERT_MODE'),
+    accessPassword: empty(env.ACCESS_PASSWORD),
   };
 }
 

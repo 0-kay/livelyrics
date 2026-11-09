@@ -1,0 +1,8 @@
+# Files Cloud Build never receives. Keys stay on your machine.
+.env
+.env.*
+!.env.example
+.git
+**/node_modules
+**/dist
+*.log

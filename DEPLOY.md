@@ -1,4 +1,25 @@
-# Deploying to Google Cloud Run (notes only)
+# Deploying
+
+## Vercel (recommended for personal use)
+
+The repo deploys to Vercel as is: `vercel.json` builds everything, serves the client from the CDN, runs the API as one serverless function (`api/index.js` wraps the same Fastify app), and `middleware.js` puts the whole site behind a password.
+
+1. Go to https://vercel.com/new, import `0-kay/livelyrics` from GitHub (allow Vercel to see the repo if asked). Leave the framework as Other; `vercel.json` supplies the commands.
+2. Add these environment variables (Settings > Environment Variables, Production):
+   - `PROVIDER_MODE` = `real`
+   - `ACRCLOUD_HOST`, `ACRCLOUD_ACCESS_KEY`, `ACRCLOUD_ACCESS_SECRET` (from your `.env`)
+   - `LRCLIB_USER_AGENT` = `livelyrics/0.1 (your email)`
+   - `ACCESS_PASSWORD` = a password of your choice. The browser asks for it once (any user name). Without it, anyone with the link can use your ACRCloud quota.
+   - Leave `CONCERT_MODE` unset (off).
+3. Deploy. Open the `*.vercel.app` link on your phone (HTTPS, so the mic works), sign in, tap Listen.
+
+Every push to `main` redeploys automatically, including the nightly runs. Notes: the lyrics cache lives per warm function instance, so it is lost on cold starts; uploads are capped at 4 MB (a 6s clip is about 200 KB); the Hobby plan is for personal, non-commercial use, which matches LRCLIB's terms. `GET /api/health` stays open without the password.
+
+To check the build locally without deploying: `npx vercel build` (needs a `.vercel/project.json`, ignored by git).
+
+# Google Cloud Run (alternative)
+
+`scripts/deploy-cloudrun.sh [PROJECT_ID] [REGION]` builds with Cloud Build, stores the keys in Secret Manager and deploys with `ACCESS_PASSWORD` set (it asks for one if `.env` has none). It has not been run against a real project yet. Manual notes follow.
 
 These are notes for a future deploy. Nothing here has been deployed. Do not commit keys; pass them as Cloud Run secrets or env vars.
 

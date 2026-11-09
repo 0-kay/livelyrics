@@ -15,7 +15,11 @@ async function main() {
     logger: true,
     staticDir: config.staticDir,
     concertMode: config.concertMode,
+    accessPassword: config.accessPassword,
   });
+  if (!config.accessPassword && process.env.K_SERVICE) {
+    console.warn('ACCESS_PASSWORD is not set: anyone with the link can use this deployment and your ACRCloud quota.');
+  }
   if (config.concertMode && !providers.transcription) {
     console.warn('CONCERT_MODE=on but no transcription provider is configured (set OPENAI_API_KEY); concert mode is off.');
   }

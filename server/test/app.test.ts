@@ -151,3 +151,34 @@ describe('config and provider selection', () => {
     expect(p.transcription).toBeNull();
   });
 });
+
+describe('access password', () => {
+  const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
+  async function locked() {
+    const providers = createProviders(loadConfig({ PROVIDER_MODE: 'mock' }));
+    return buildApp({ mode: 'mock', providers, accessPassword: 'karaoke night' });
+  }
+  it('asks for the password on API calls and pages', async () => {
+    const app = await locked();
+    const res = await app.inject({ method: 'POST', url: '/api/identify', ...multipartBody('audio', 'a.wav', 'audio/wav', audio) });
+    expect(res.statusCode).toBe(401);
+    expect(res.headers['www-authenticate']).toContain('Basic');
+    expect((await app.inject({ method: 'GET', url: '/' })).statusCode).toBe(401);
+  });
+  it('lets the right password through with any user name, and rejects a wrong one', async () => {
+    const app = await locked();
+    const body = multipartBody('audio', 'a.wav', 'audio/wav', audio);
+    const good = await app.inject({ method: 'POST', url: '/api/identify', payload: body.payload, headers: { ...body.headers, authorization: basic('me', 'karaoke night') } });
+    expect(good.statusCode).toBe(200);
+    const bad = await app.inject({ method: 'POST', url: '/api/identify', payload: body.payload, headers: { ...body.headers, authorization: basic('me', 'nope') } });
+    expect(bad.statusCode).toBe(401);
+  });
+  it('keeps /api/health open for uptime checks', async () => {
+    const app = await locked();
+    expect((await app.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(200);
+  });
+  it('reads ACCESS_PASSWORD from the environment', () => {
+    expect(loadConfig({ ACCESS_PASSWORD: ' secret ' }).accessPassword).toBe('secret');
+    expect(loadConfig({}).accessPassword).toBeUndefined();
+  });
+});
