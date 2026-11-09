@@ -1,5 +1,6 @@
 import { FloatRingBuffer } from './ringBuffer.js';
 import { RhythmWatch, type BeatFrame, type ChangeSnapshot } from './rhythm.js';
+import { SoundSignature, type SignatureSnapshot } from './signature.js';
 import { SilenceGapDetector } from './silence.js';
 import { downsample, encodeWav } from './wav.js';
 
@@ -49,7 +50,10 @@ export class MicRecorder {
   onGapEnd: (() => void) | undefined;
   /** Called when the local rhythm tracker decides the song changed (no network). */
   onSongChange: (() => void) | undefined;
+  /** Called with the estimated change point when the sound signature shifts (no network). */
+  onSignatureChange: ((changeAtMs: number) => void) | undefined;
   private rhythm: RhythmWatch | null = null;
+  private signature: SoundSignature | null = null;
   private armedKey: string | null = null;
 
   constructor(opts: MicRecorderOptions = {}) {
@@ -79,13 +83,19 @@ export class MicRecorder {
     this.gap.reset();
     this.rhythm = new RhythmWatch(ctx.sampleRate);
     this.rhythm.change.onChange = () => this.onSongChange?.();
-    if (this.armedKey) this.rhythm.change.arm(this.armedKey);
+    this.signature = new SoundSignature(ctx.sampleRate);
+    this.signature.onChange = (at) => this.onSignatureChange?.(at);
+    if (this.armedKey) {
+      this.rhythm.change.arm(this.armedKey);
+      this.signature.arm(this.armedKey);
+    }
     const src = ctx.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(ctx, 'livelyrics-tap');
     this.node.port.onmessage = (e: MessageEvent<Float32Array>) => {
       this.ring?.push(e.data);
       this.lastSampleAt = performance.now();
       this.rhythm?.push(e.data, this.lastSampleAt);
+      this.signature?.push(e.data, this.lastSampleAt);
       if (this.gap.push(e.data, this.lastSampleAt)) this.onGapEnd?.();
     };
     src.connect(this.node);
@@ -99,11 +109,17 @@ export class MicRecorder {
   armRhythm(key: string): void {
     this.armedKey = key;
     this.rhythm?.change.arm(key);
+    this.signature?.arm(key);
   }
 
   disarmRhythm(): void {
     this.armedKey = null;
     this.rhythm?.change.disarm();
+    this.signature?.disarm();
+  }
+
+  signatureSnapshot(): SignatureSnapshot | null {
+    return this.signature ? this.signature.snapshot : null;
   }
 
   /** Beat readout for the visuals, or null when the mic is off. */
@@ -148,6 +164,7 @@ export class MicRecorder {
     this.node = null;
     this.ring = null;
     this.rhythm = null;
+    this.signature = null;
     this.armedKey = null;
   }
 }

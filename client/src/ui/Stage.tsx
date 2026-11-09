@@ -31,6 +31,8 @@ export interface StageProps {
   getBeat?: (nowMs: number) => BeatFrame | null;
   /** Song-change tracker state, for the ?debug=1 readout. */
   getRhythm?: () => ChangeSnapshot | null;
+  /** Extra ?debug=1 lines (clip match rates, change search). */
+  getDebugExtra?: () => string[];
   /** Written every frame with the shown position, so a song change can freeze the old lyrics where they were. */
   lastPosRef: { current: { key: string; posMs: number } | null };
   concert: { available: boolean; on: boolean; lastText: string | null };
@@ -658,7 +660,7 @@ export function Stage(p: StageProps) {
       </div>
 
       {debug && running && (
-        <RhythmDebug beat={beat} rhythm={p.getRhythm ? p.getRhythm() : null} />
+        <RhythmDebug beat={beat} rhythm={p.getRhythm ? p.getRhythm() : null} extra={p.getDebugExtra ? p.getDebugExtra() : []} />
       )}
 
       <div aria-live="polite" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap' }}>{liveText}</div>
@@ -666,13 +668,16 @@ export function Stage(p: StageProps) {
   );
 }
 
-function RhythmDebug({ beat, rhythm }: { beat: BeatFrame | null; rhythm: ChangeSnapshot | null }) {
+function RhythmDebug({ beat, rhythm, extra }: { beat: BeatFrame | null; rhythm: ChangeSnapshot | null; extra: string[] }) {
   const f = (n: number | null | undefined, d = 0) => (n == null ? '-' : n.toFixed(d));
   return (
     <div style={{ position: 'absolute', zIndex: 9, left: 12, bottom: 110, padding: '8px 10px', borderRadius: 10, background: 'rgba(0,0,0,.6)', color: '#fff', fontFamily: MONO, fontSize: 11, lineHeight: 1.5, pointerEvents: 'none' }}>
       <div>beat {f(beat?.bpm, 1)} BPM · {beat?.energy ?? '-'} · lvl {f(beat?.level, 2)} · {beat?.onGrid ? 'grid' : 'onsets'}</div>
       <div>song {rhythm?.state ?? '-'} · ref {f(rhythm?.refBpm, 1)} · now {f(rhythm?.bpm, 1)} · conf {f(rhythm?.confidence, 2)}</div>
       <div>{rhythm?.verdict ?? '-'} · on grid {f(rhythm ? rhythm.onGridShare * 100 : null)}% · off for {f(rhythm ? rhythm.mismatchMs / 1000 : null, 1)}s</div>
+      {extra.map((l, i) => (
+        <div key={i}>{l}</div>
+      ))}
     </div>
   );
 }

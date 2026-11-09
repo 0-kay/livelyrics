@@ -79,8 +79,8 @@ export const SCHEDULER_CONFIG = {
    * the position steady and notices a new song within seconds. Each check is
    * one recognition request: about 800 per hour of listening at 4-5s.
    */
-  lockedMinIntervalMs: 3_000,
-  lockedMaxIntervalMs: 3_500,
+  lockedMinIntervalMs: 5_000,
+  lockedMaxIntervalMs: 6_000,
   /** Delay after a no-match while locked or confirming (ms). */
   retryIntervalMs: 2_000,
   /** Consecutive no-matches after which we drop the lock and start over. */
@@ -93,27 +93,29 @@ export const SCHEDULER_CONFIG = {
  */
 export const CAPTURE_CONFIG = {
   /**
-   * Seconds of the most recent audio sent per routine check while a song is on.
-   * Override with ?clip=N in the URL. Shorter clips miss more often on a real mic.
-   */
-  clipSeconds: 6,
-  /**
-   * Shorter clip for the very first check (lyrics sooner) and for checks
-   * triggered by a suspected song change (the clip is mostly new audio sooner).
+   * Every clip is cut from audio after a boundary: Listen, a detected change
+   * point, or a lost song. Finding a song tries quickClipSeconds once (fast when
+   * the sound is clear), then longClipSeconds, which matches far more reliably
+   * through a phone or laptop mic in a room. The long try is not delayed by the
+   * quick one: it goes out as soon as that much audio exists.
    */
   quickClipSeconds: 4,
+  longClipSeconds: 8,
   /**
-   * While searching, each "no match" grows the next clip by this many seconds,
-   * up to maxClipSeconds (or what is buffered): 4s, then 6, 8, 10. A first try
-   * on a short clip is fast when it works; longer clips match far more reliably
-   * through a phone or laptop mic in a room.
+   * Routine checks while a song is on (position and backup change detection).
+   * Override with ?clip=N in the URL.
    */
-  searchClipStepSeconds: 2,
+  clipSeconds: 8,
+  /**
+   * A "no match" on a clip shorter than this is weak evidence (short clips miss
+   * often even on the right song), so it never counts toward losing the song.
+   */
+  weakMissBelowSeconds: 6,
   /** Allowed range for the clip length override. */
   minClipSeconds: 3,
   maxClipSeconds: 10,
   /** Rolling mic buffer length in seconds. Must be at least maxClipSeconds. */
-  bufferSeconds: 10,
+  bufferSeconds: 12,
   /** Wait this long before trying again when the mic buffer is not full yet (ms). */
   bufferWaitMs: 300,
 } as const;
@@ -127,6 +129,10 @@ export const TRIGGER_CONFIG = {
   minGapMs: 1_500,
   /** Extra wait (ms) after a trigger so the clip holds only the new audio. Added to the clip length. */
   settleMarginMs: 700,
+  /** A change-point search that finds nothing gives up being special after this long (ms). */
+  changeSearchMs: 15_000,
+  /** The rhythm detector decides this long after the new rhythm began (sustain plus estimate lag, ms). */
+  rhythmChangeLagMs: 4_000,
   /** Never schedule the end-of-song recheck sooner than this (ms). */
   minEndRecheckMs: 1_500,
 } as const;
@@ -226,6 +232,33 @@ export const RHYTHM_CONFIG = {
   maxFlashHz: 3,
   /** Visual pulses fire this much before a predicted beat, to cover screen latency (ms). */
   visualLeadMs: 30,
+} as const;
+
+/**
+ * Sound-signature change detector (client/src/audio/signature.ts): learns the
+ * song's tonal balance across four bands and reports a possible new song when
+ * it shifts and stays shifted. It only asks for a check from that point; it
+ * never changes the screen.
+ */
+export const SIGNATURE_CONFIG = {
+  /** Band edges (Hz): bass, low-mid, mid, high. */
+  bandEdgesHz: [150, 600, 2_500] as readonly number[],
+  /** Analysis block (ms). */
+  blockMs: 500,
+  /** Learn the song's balance over this long after it is armed (s). */
+  learnSeconds: 8,
+  /** Blocks averaged for a decision (3s). */
+  windowBlocks: 6,
+  /** Average distance (in learned spreads) that counts as a different sound. */
+  threshold: 2.6,
+  /** Blocks quieter than this RMS are ignored (silence, very soft passages). */
+  minRms: 0.002,
+  /** Per-band spread floor, so a very steady song does not become oversensitive. */
+  spreadFloor: 0.2,
+  /** The learned balance follows slow changes within a song at this rate per block. */
+  adaptRate: 0.02,
+  /** Report the change this long before the decision: the start of the window (ms). */
+  lagMs: 3_000,
 } as const;
 
 /**

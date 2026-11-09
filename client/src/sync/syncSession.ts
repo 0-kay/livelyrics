@@ -21,30 +21,34 @@ export interface SessionClip {
 }
 
 export interface SyncSessionDeps {
-  /** Most recent `seconds` of audio (default clip length when omitted), or null if not buffered yet. */
-  getClip: (seconds?: number) => SessionClip | null;
+  /** The most recent `seconds` of audio, or null if that much is not buffered yet. */
+  getClip: (seconds: number) => SessionClip | null;
   identify: (clip: Blob) => Promise<IdentifyResponse>;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   onChange?: (s: SyncSnapshot) => void;
   latencyCompMs?: number;
-  /**
-   * How long after a trigger (song end, gap in the audio) to wait before
-   * recognizing, so the clip holds only the new audio. Default: clip length
-   * plus a small margin.
-   */
-  settleMs?: number;
   /** Override the recognition scheduler (tests use this to make regular checks rare). */
   scheduler?: RecognitionScheduler;
-  /** Clip length for the first check and for checks after a suspected change (s). */
-  quickClipSeconds?: number;
-  /** Seconds of audio buffered right now, so a searching clip can grow up to it. */
+  /** Seconds of audio buffered right now; clips never ask for more. Omit to assume enough. */
   bufferedSeconds?: () => number;
+  /** Routine clip length while a song is on (s). Default CAPTURE_CONFIG.clipSeconds (the ?clip= override). */
+  routineClipSeconds?: number;
+  /** Quick and long clip lengths for finding a song (s). Defaults from CAPTURE_CONFIG. */
+  quickClipSeconds?: number;
+  longClipSeconds?: number;
 }
 
 /** Returning to the song we just left within this long needs two answers in a row (ms). */
 const FLIP_BACK_GUARD_MS = 20_000;
+/** Two change reports this close together are the same change (ms). */
+const SAME_CHANGE_MS = 6_000;
+
+export interface ClipStat {
+  sent: number;
+  matched: number;
+}
 
 export interface SyncSnapshot {
   running: boolean;
@@ -58,10 +62,13 @@ export interface SyncSnapshot {
   error: string | null;
   recognitions: number;
   /**
-   * The local rhythm tracker heard a different song. The screen can move on
-   * right away; the next recognition confirms (new song) or clears it (same song).
+   * A local detector (rhythm, sound signature, gap, song end) reported a
+   * change and the session is identifying audio since that point. The screen
+   * does not change on this alone; it follows the server's answer.
    */
   changeSuspected: boolean;
+  /** Recognitions sent and matched per clip length (whole seconds), for tuning. */
+  clipStats: Record<number, ClipStat>;
 }
 
 /** Wait this long when the mic buffer is not full yet (ms). */
@@ -70,9 +77,15 @@ const BUFFER_WAIT_MS = CAPTURE_CONFIG.bufferWaitMs;
 const trackKey = (t: TrackMatch) => `${t.artist.trim().toLowerCase()}|${t.title.trim().toLowerCase()}`;
 
 /**
- * Re-recognition loop: grabs a clip from the rolling mic buffer, identifies it,
+ * Re-recognition loop: cuts a clip from the rolling mic buffer, identifies it,
  * feeds the result into the adaptive clock, and lets the scheduler decide when
- * to try again (fast until locked, then every 20-30s).
+ * to try again.
+ *
+ * Clips: every clip is cut from audio after a boundary (Listen, a detected
+ * change point, a lost song), so a clip meant to find a new song never holds
+ * the old one. Finding a song sends a quick clip once, then long clips; while
+ * a song is on, routine checks send the routine length. A miss on a short clip
+ * is weak evidence and never counts toward losing the song.
  */
 export class SyncSession {
   readonly clock: AdaptivePlaybackClock;
@@ -84,18 +97,21 @@ export class SyncSession {
   private nextAt = 0;
   private inflight = false;
   private soonMs: number | null = null;
-  private readonly settleMs: number;
-  private readonly quickClipSeconds: number;
-  /** Use the short clip for the next check (first check, suspected change). */
-  private quickNext = true;
-  /** "No match" answers in a row while no song is on; each one grows the next clip. */
-  private searchMisses = 0;
-  /** When the last song was lost; a searching clip never reaches back before it (old song audio). */
-  private lostAtMs: number | null = null;
+  private generation = 0;
+  private readonly routineSec: number;
+  private readonly quickSec: number;
+  private readonly longSec: number;
+  /** Audio before this wall time is not used for the current job. -Infinity: all buffered audio. */
+  private boundaryMs = -Infinity;
+  /** Tries since the boundary while finding a song (the first one may be quick). */
+  private findTries = 0;
+  /** Change point being identified, or null. */
+  private changeAt: number | null = null;
+  /** Predicted end of the current song (wall ms), or null. */
+  private endAt: number | null = null;
   /** Song we switched away from, and when, for the flip-back guard. */
   private previous: { key: string; at: number } | null = null;
   private pendingBack: string | null = null;
-  private generation = 0;
   private readonly bpmCheck = new BpmCrossCheck();
   private bpmKey: string | null = null;
   private snap: SyncSnapshot = {
@@ -110,6 +126,7 @@ export class SyncSession {
     error: null,
     recognitions: 0,
     changeSuspected: false,
+    clipStats: {},
   };
 
   constructor(private readonly deps: SyncSessionDeps) {
@@ -118,8 +135,9 @@ export class SyncSession {
     this.now = deps.now ?? (() => performance.now());
     this.setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
-    this.settleMs = deps.settleMs ?? CAPTURE_CONFIG.clipSeconds * 1000 + TRIGGER_CONFIG.settleMarginMs;
-    this.quickClipSeconds = deps.quickClipSeconds ?? CAPTURE_CONFIG.quickClipSeconds;
+    this.routineSec = deps.routineClipSeconds ?? CAPTURE_CONFIG.clipSeconds;
+    this.quickSec = deps.quickClipSeconds ?? CAPTURE_CONFIG.quickClipSeconds;
+    this.longSec = deps.longClipSeconds ?? CAPTURE_CONFIG.longClipSeconds;
   }
 
   get snapshot(): SyncSnapshot {
@@ -136,14 +154,15 @@ export class SyncSession {
     this.generation++;
     this.inflight = false;
     this.soonMs = null;
-    this.quickNext = true;
-    this.searchMisses = 0;
-    this.lostAtMs = null;
+    this.boundaryMs = this.deps.bufferedSeconds ? -Infinity : this.now();
+    this.findTries = 0;
+    this.changeAt = null;
+    this.endAt = null;
     this.previous = null;
     this.pendingBack = null;
     this.scheduler.reset();
     this.clock.reset();
-    this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0, changeSuspected: false });
+    this.update({ running: true, state: 'searching', track: null, lyrics: null, error: null, lastAction: null, recognitions: 0, changeSuspected: false, clipStats: {} });
     this.schedule(this.scheduler.initialDelayMs());
   }
 
@@ -157,17 +176,32 @@ export class SyncSession {
   }
 
   /**
-   * The rhythm on the mic no longer fits the song (decided locally, no
-   * network). Flag it for the screen and recognize as soon as the clip holds
-   * mostly new audio. `newAudioMs` is how long the new rhythm has already played.
+   * A local detector (rhythm, sound signature, gap in the audio, song end)
+   * says a new song may have started at `atMs` (wall time, same clock as now).
+   * Identify audio from that point only: a quick clip as soon as it exists,
+   * then long clips. The screen keeps the current song until a check names
+   * another one, so a false alarm costs a request and nothing visible.
    */
+  changeDetected(atMs: number): void {
+    if (!this.snap.running) return;
+    const at = Math.min(atMs, this.now());
+    if (this.changeAt !== null && Math.abs(at - this.changeAt) < SAME_CHANGE_MS) {
+      // Another detector saw the same change: trust the later estimate (surely new audio).
+      this.boundaryMs = Math.max(this.boundaryMs, at);
+      return;
+    }
+    if (!this.snap.track && at <= this.boundaryMs) return; // already searching over newer audio
+    this.changeAt = at;
+    this.boundaryMs = at;
+    this.findTries = 0;
+    if (this.snap.track) this.update({ changeSuspected: true });
+    this.recheckSoon(Math.max(0, at + this.quickSec * 1000 - this.now()));
+  }
+
+  /** Same as changeDetected, given how long the new audio has already played (ms). */
   suspectSongChange(newAudioMs: number = 3_000): void {
-    if (!this.snap.running || !this.snap.track || this.snap.changeSuspected) return;
-    this.update({ changeSuspected: true });
-    // A short clip holds mostly new audio sooner.
-    this.quickNext = true;
-    const quickSettle = this.quickClipSeconds * 1000 + TRIGGER_CONFIG.settleMarginMs;
-    this.recheckSoon(Math.max(TRIGGER_CONFIG.minEndRecheckMs, quickSettle - newAudioMs));
+    if (!this.snap.track) return;
+    this.changeDetected(this.now() - newAudioMs);
   }
 
   /**
@@ -198,12 +232,11 @@ export class SyncSession {
   }
 
   /**
-   * Ask for a recognition sooner than the timer would give one, for example
-   * after a gap in the audio. Never delays a check that is already due earlier.
+   * Ask for a recognition sooner than the timer would give one. Never delays a
+   * check that is already due earlier.
    */
-  recheckSoon(ms: number = this.settleMs, quickClip = false): void {
+  recheckSoon(ms: number): void {
     if (!this.snap.running) return;
-    if (quickClip) this.quickNext = true;
     if (this.inflight) {
       this.soonMs = Math.min(this.soonMs ?? Infinity, ms);
       return;
@@ -235,29 +268,73 @@ export class SyncSession {
     return Math.max(0, (match.durationMs - pos) / Math.max(rate, 0.1));
   }
 
+  /** True while looking for a song: nothing on, or a change point is being identified. */
+  private get finding(): boolean {
+    return !this.snap.track || this.changeAt !== null;
+  }
+
   /**
-   * Clip length for the next check: the short quick clip when asked for; while
-   * searching, longer after every miss (up to what is buffered); otherwise the
-   * routine length.
+   * Length of the next clip, or how long to wait until enough audio after the
+   * boundary exists. Finding: quick once, then long (up to what is there,
+   * at most maxClipSeconds). Routine: the routine length, cut at the boundary.
    */
+  planClip(): { seconds: number } | { waitMs: number } {
+    const since = (this.now() - this.boundaryMs) / 1000;
+    const buffered = this.deps.bufferedSeconds?.() ?? Infinity;
+    const avail = Math.floor(Math.min(since, buffered) * 10) / 10;
+    let need: number;
+    let seconds: number;
+    if (this.finding) {
+      // Skip the quick try when a long clip is already available.
+      const quick = this.findTries === 0 && avail < this.longSec;
+      need = quick ? this.quickSec : this.longSec;
+      seconds = quick ? this.quickSec : Math.min(CAPTURE_CONFIG.maxClipSeconds, Math.max(this.longSec, avail));
+    } else {
+      need = this.quickSec;
+      seconds = Math.min(this.routineSec, avail);
+    }
+    if (avail + 1e-6 < need) {
+      const shortBy = need - Math.min(since, buffered);
+      return { waitMs: Math.max(BUFFER_WAIT_MS, Math.ceil(shortBy * 1000) + 50) };
+    }
+    return { seconds: Math.min(seconds, avail) };
+  }
+
+  /** Back-compat for tests: the next clip length, or undefined while waiting. */
   clipSeconds(): number | undefined {
-    if (this.quickNext) return this.quickClipSeconds;
-    if (this.snap.track) return undefined;
-    let want = Math.min(CAPTURE_CONFIG.maxClipSeconds, this.quickClipSeconds + CAPTURE_CONFIG.searchClipStepSeconds * this.searchMisses);
-    // After losing a song, only grow over audio heard since then, or the old song is found again.
-    if (this.lostAtMs !== null) want = Math.min(want, (this.now() - this.lostAtMs) / 1000);
-    const buffered = this.deps.bufferedSeconds?.();
-    if (buffered !== undefined) want = Math.min(want, Math.floor(buffered * 10) / 10);
-    return Math.max(this.quickClipSeconds, want);
+    const p = this.planClip();
+    return 'seconds' in p ? p.seconds : undefined;
   }
 
   private async tick(gen: number): Promise<void> {
-    const clip = this.deps.getClip(this.clipSeconds());
+    const t = this.now();
+    // The song should be over: identify audio from its predicted end.
+    if (this.endAt !== null && t >= this.endAt - 50 && this.changeAt === null && this.snap.track) {
+      const at = this.endAt;
+      this.endAt = null;
+      this.changeAt = at;
+      this.boundaryMs = Math.max(this.boundaryMs, at);
+      this.findTries = 0;
+    }
+    // A change-point search that found nothing stops being special (its boundary stays).
+    if (this.changeAt !== null && t - this.changeAt > TRIGGER_CONFIG.changeSearchMs) {
+      this.changeAt = null;
+      if (this.snap.changeSuspected) this.update({ changeSuspected: false });
+    }
+
+    const plan = this.planClip();
+    if ('waitMs' in plan) {
+      this.schedule(plan.waitMs);
+      return;
+    }
+    const clip = this.deps.getClip(plan.seconds);
     if (!clip) {
       this.schedule(BUFFER_WAIT_MS);
       return;
     }
-    this.quickNext = false;
+    const clipSec = plan.seconds;
+    const wasFinding = this.finding;
+    if (wasFinding) this.findTries++;
     const sentAt = this.now();
     let res: IdentifyResponse;
     this.inflight = true;
@@ -275,38 +352,52 @@ export class SyncSession {
     this.inflight = false;
     const responseAt = this.now();
     const recognitions = this.snap.recognitions + 1;
+    const statKey = Math.round(clipSec);
+    const prevStat = this.snap.clipStats[statKey] ?? { sent: 0, matched: 0 };
+    const clipStats = { ...this.snap.clipStats, [statKey]: { sent: prevStat.sent + 1, matched: prevStat.matched + (res.match ? 1 : 0) } };
 
     if (!res.match) {
-      if (!this.snap.track) this.searchMisses++;
-      const d = this.scheduler.onResult({ matched: false });
+      const weak = clipSec < CAPTURE_CONFIG.weakMissBelowSeconds;
+      const d = this.scheduler.onResult({ matched: false, weak });
       if (d.lostLock) {
-        this.searchMisses = 0;
-        this.lostAtMs = responseAt;
+        // Several long clips in a row found nothing: the song is gone. Look again from recent audio.
         this.clock.reset();
+        this.changeAt = null;
+        this.endAt = null;
+        this.boundaryMs = Math.max(this.boundaryMs, responseAt - (this.longSec - this.quickSec) * 1000);
+        this.findTries = 0;
         this.update({ track: null, lyrics: null, lyricsTimeScale: 1, rate: 1, changeSuspected: false });
       }
-      this.update({ state: d.state, lastAction: 'miss', error: null, recognitions });
+      this.update({ state: d.state, lastAction: 'miss', error: null, recognitions, clipStats });
       this.schedule(d.nextDelayMs);
       return;
     }
 
-    this.searchMisses = 0;
-    this.lostAtMs = null;
     const newKey = trackKey(res.match);
     const songChanged = !this.snap.track || trackKey(this.snap.track) !== newKey;
     // During a DJ crossfade answers can alternate between two songs. Going back to the song we
     // just left needs a second answer in a row, so the screen does not flip back and forth.
     if (songChanged && this.previous && this.previous.key === newKey && responseAt - this.previous.at < FLIP_BACK_GUARD_MS && this.pendingBack !== newKey) {
       this.pendingBack = newKey;
-      this.update({ recognitions, lastAction: 'miss', error: null });
+      this.update({ recognitions, lastAction: 'miss', error: null, clipStats });
       this.schedule(SCHEDULER_CONFIG.searchIntervalMs);
       return;
     }
     this.pendingBack = null;
     if (songChanged) {
-      if (this.snap.track) this.previous = { key: trackKey(this.snap.track), at: responseAt };
+      if (this.snap.track) {
+        this.previous = { key: trackKey(this.snap.track), at: responseAt };
+        // Found by a routine check (no change point): the new song started somewhere in that clip.
+        if (this.changeAt === null) this.boundaryMs = Math.max(this.boundaryMs, clip.capturedAtMs - (clipSec * 1000) / 2);
+      }
       this.clock.reset();
+    } else if (this.changeAt !== null) {
+      // False alarm: still the same song, so all buffered audio is usable again.
+      this.boundaryMs = -Infinity;
     }
+    this.changeAt = null;
+    this.findTries = 0;
+
     const sample = sampleFromRecognition({
       playOffsetMs: res.match.playOffsetMs,
       clipEndWallMs: clip.capturedAtMs,
@@ -333,12 +424,13 @@ export class SyncSession {
       error: null,
       recognitions,
       changeSuspected: false,
+      clipStats,
     });
-    // The song should be over by now: check again once the buffer holds only
-    // new audio, instead of waiting out the 20-30s timer.
+    // Know when the song should end, so the next song is looked for from that moment.
     let next = d.nextDelayMs;
     const endIn = this.msUntilEnd(res.match, upd.rate);
-    if (endIn !== null) next = Math.min(next, Math.max(endIn + this.settleMs, TRIGGER_CONFIG.minEndRecheckMs));
+    this.endAt = endIn === null ? null : responseAt + endIn;
+    if (endIn !== null) next = Math.min(next, Math.max(endIn, TRIGGER_CONFIG.minEndRecheckMs));
     this.schedule(next);
   }
 

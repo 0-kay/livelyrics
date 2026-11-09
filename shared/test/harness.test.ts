@@ -33,7 +33,8 @@ describe('synthetic harness: noisy samples', () => {
         expect(percentile(r.errors, 95, 30_000)).toBeLessThan(1_100);
         expect(percentile(r.errors, 95, 50_000)).toBeLessThan(450);
         expect(percentile(r.errors, 100, 50_000)).toBeLessThan(600);
-        expect(percentile(r.errors, 50, 30_000)).toBeLessThan(200);
+        // With the calmer 5-6s routine pace, the worst seed at 0.8x/1.25x settles by ~40s.
+        expect(percentile(r.errors, 50, 40_000)).toBeLessThan(200);
         expect(r.lockedAtMs).not.toBeNull();
         expect(r.lockedAtMs!).toBeLessThan(90_000);
         // Once locked, outliers are held as suspects and never cause a position jump on their own.

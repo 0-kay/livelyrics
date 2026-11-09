@@ -56,7 +56,8 @@ function harness(opts: {
       return r;
     },
     onChange: (s) => snaps.push(s),
-    settleMs: 7_000,
+    // Like the mic: audio accumulates from Listen (the session starts at time 0 here).
+    bufferedSeconds: () => Math.min(CAPTURE_CONFIG.bufferSeconds, now / 1000),
   });
   const runFor = async (ms: number) => {
     const end = now + ms;
@@ -84,15 +85,15 @@ describe('SyncSession', () => {
     expect(h.session.positionMs()).toBeCloseTo(30_000 + h.getNow() * 1.1, -1);
     const callsAtLock = h.calls();
     await h.runFor(60_000);
-    // Locked: one check every 3-3.5s (plus the 1s simulated latency), so about 14-15 a minute.
-    expect(h.calls() - callsAtLock).toBeLessThanOrEqual(16);
-    expect(h.calls() - callsAtLock).toBeGreaterThanOrEqual(12);
+    // Locked: one check every 5-6s (plus the 1s simulated latency), so about 9-10 a minute.
+    expect(h.calls() - callsAtLock).toBeLessThanOrEqual(12);
+    expect(h.calls() - callsAtLock).toBeGreaterThanOrEqual(8);
   });
 
   it('keeps going through server errors and reports them', async () => {
     const h = harness({ respond: (n) => (n === 1 ? new Error('Server error 502') : undefined!) });
     h.session.start();
-    await h.runFor(5_000);
+    await h.runFor(10_000);
     expect(h.snaps.some((s) => s.lastAction === 'error' && s.error === 'Server error 502')).toBe(true);
     await h.runFor(20_000);
     expect(h.session.snapshot.error).toBeNull();
@@ -143,7 +144,7 @@ describe('SyncSession', () => {
     const gate = new Promise<void>((r) => (release = r));
     const h = harness({ gate });
     h.session.start();
-    await h.runFor(100); // first request is now waiting on the gate
+    await h.runFor(4_100); // the first (quick 4s) request is now waiting on the gate
     h.session.recheckSoon(500);
     release();
     await new Promise((r) => setTimeout(r, 0));
@@ -160,12 +161,12 @@ describe('SyncSession', () => {
     await h.runFor(50_000);
     expect(h.session.snapshot.state).toBe('locked');
     const before = h.calls();
-    // Before the end plus the 7s settle time, nothing is due (regular checks are 100s apart).
+    // At the end (60s) the session starts looking for the next song from that moment, so the
+    // first check goes out once 4s of new audio exist (64s). Regular checks are 100s apart.
     await h.runFor(12_000);
     expect(h.calls()).toBe(before);
-    // After it, the song-end trigger fires one check.
-    await h.runFor(15_000);
-    expect(h.calls()).toBeGreaterThan(before);
+    await h.runFor(3_000);
+    expect(h.calls()).toBe(before + 1);
   });
 
   it('switches to a new song when a recheck returns a different track', async () => {
@@ -188,19 +189,18 @@ describe('SyncSession', () => {
     expect(h.session.snapshot.state).not.toBe('locked');
   });
 
-  it('suspectSongChange flags the change and checks within the settle time minus the new audio', async () => {
+  it('a detected change checks as soon as 4s of audio since the change point exist', async () => {
     const h = harness({ scheduler: slowScheduler() });
     h.session.start();
     await h.runFor(40_000);
     expect(h.session.snapshot.state).toBe('locked');
     const before = h.calls();
-    h.session.suspectSongChange(3_000);
+    // The new song began 3s ago: a quick 4s clip of it exists in about 1s (not 100s).
+    h.session.changeDetected(h.getNow() - 3_000);
     expect(h.session.snapshot.changeSuspected).toBe(true);
-    // A quick 4s clip settles in 4.7s; 3s of new audio already played, so the check is due in
-    // about 1.7s, not 100s.
-    await h.runFor(1_500);
+    await h.runFor(800);
     expect(h.calls()).toBe(before);
-    await h.runFor(1_000);
+    await h.runFor(500);
     expect(h.calls()).toBe(before + 1);
     // Same song came back: the flag clears.
     expect(h.session.snapshot.changeSuspected).toBe(false);
@@ -249,24 +249,80 @@ describe('SyncSession', () => {
     expect(h.session.checkTempo(150)).toBe('idle');
   });
 
-  it('grows the clip after each miss while searching, up to what is buffered', () => {
-    const asked: (number | undefined)[] = [];
-    const s = new SyncSession({
-      now: () => 0,
-      setTimer: () => 0,
-      clearTimer: () => {},
-      getClip: (sec) => {
-        asked.push(sec);
-        return null;
-      },
-      identify: async () => ({ match: null, lyrics: null, processingMs: 1, lyricsCached: false, lyricsTimeScale: 1 }),
-      bufferedSeconds: () => 7,
+  it('finds the first song with a quick 4s try, then a full 8s clip as soon as it exists', async () => {
+    const sizes: number[] = [];
+    const h = harness({ respond: (n) => ({ match: null, lyrics: null, processingMs: 1, lyricsCached: false, lyricsTimeScale: 1 }) });
+    const orig = (h.session as unknown as { deps: { getClip: (s: number) => unknown } }).deps.getClip;
+    (h.session as unknown as { deps: { getClip: (s: number) => unknown } }).deps.getClip = (sec: number) => {
+      sizes.push(sec);
+      return orig(sec);
+    };
+    h.session.start();
+    await h.runFor(4_100);
+    expect(sizes).toEqual([CAPTURE_CONFIG.quickClipSeconds]);
+    await h.runFor(4_100); // 8.2s since Listen: the long clip went out at 8s, not later
+    expect(sizes[1]).toBe(CAPTURE_CONFIG.longClipSeconds);
+    await h.runFor(6_000);
+    expect(sizes.slice(2).every((s) => s >= CAPTURE_CONFIG.longClipSeconds)).toBe(true);
+  });
+
+  it('cuts clips at the change point, so a new-song clip never holds the old song', async () => {
+    const h = harness({ scheduler: slowScheduler() });
+    h.session.start();
+    await h.runFor(40_000);
+    const sent: { at: number; sec: number }[] = [];
+    const deps = (h.session as unknown as { deps: { getClip: (s: number) => unknown } }).deps;
+    const orig = deps.getClip;
+    deps.getClip = (sec: number) => {
+      sent.push({ at: h.getNow(), sec });
+      return orig(sec);
+    };
+    const at = h.getNow();
+    h.session.changeDetected(at);
+    await h.runFor(2_000);
+    expect(h.session.planClip()).toMatchObject({ waitMs: expect.any(Number) }); // only 2s since the change
+    await h.runFor(12_000);
+    expect(sent.length).toBeGreaterThan(0);
+    for (const c of sent) expect(c.sec).toBeLessThanOrEqual((c.at - at) / 1000 + 1e-6);
+    expect(sent[0]!.sec).toBe(CAPTURE_CONFIG.quickClipSeconds);
+  });
+
+  it('routine checks send the routine length while a song is on', async () => {
+    const h = harness({ scheduler: slowScheduler() });
+    h.session.start();
+    await h.runFor(40_000);
+    expect(h.session.clipSeconds()).toBe(CAPTURE_CONFIG.clipSeconds);
+  });
+
+  it('misses on short clips never lose the song; misses on long clips do', async () => {
+    let missing = false;
+    const h = harness({
+      respond: () => (missing ? { match: null, lyrics: null, processingMs: 1, lyricsCached: false, lyricsTimeScale: 1 } : (undefined as unknown as IdentifyResponse)),
     });
-    expect(s.clipSeconds()).toBe(CAPTURE_CONFIG.quickClipSeconds); // first try: quick
-    (s as unknown as { quickNext: boolean }).quickNext = false;
-    (s as unknown as { searchMisses: number }).searchMisses = 1;
-    expect(s.clipSeconds()).toBe(CAPTURE_CONFIG.quickClipSeconds + CAPTURE_CONFIG.searchClipStepSeconds);
-    (s as unknown as { searchMisses: number }).searchMisses = 5;
-    expect(s.clipSeconds()).toBe(7); // capped by the buffer
+    h.session.start();
+    await h.runFor(40_000);
+    expect(h.session.snapshot.track).not.toBeNull();
+    missing = true;
+    // Short-clip misses (quick tries after detected changes far apart) keep the song.
+    for (let i = 0; i < 4; i++) {
+      h.session.changeDetected(h.getNow());
+      await h.runFor(4_500);
+      await h.runFor(10_000);
+    }
+    const stats = h.session.snapshot.clipStats;
+    expect(stats[CAPTURE_CONFIG.quickClipSeconds]?.sent ?? 0).toBeGreaterThan(0);
+    // Long-clip misses in a row drop it.
+    await h.runFor(30_000);
+    expect(h.session.snapshot.track).toBeNull();
+  });
+
+  it('counts sent and matched clips per length', async () => {
+    const h = harness({});
+    h.session.start();
+    await h.runFor(20_000);
+    const st = h.session.snapshot.clipStats;
+    const total = Object.values(st).reduce((a, x) => a + x.sent, 0);
+    expect(total).toBe(h.calls());
+    expect(st[CAPTURE_CONFIG.quickClipSeconds]).toEqual({ sent: 1, matched: 1 });
   });
 });

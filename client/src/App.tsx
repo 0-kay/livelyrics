@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { BPM_CHECK_CONFIG, CAPTURE_CONFIG, CONCERT_CONFIG, RHYTHM_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
+import { BPM_CHECK_CONFIG, CAPTURE_CONFIG, CONCERT_CONFIG, TRIGGER_CONFIG } from '@livelyrics/shared';
 import { health, identify, transcribe } from './api.js';
 import { MicRecorder } from './audio/micRecorder.js';
 import { tempoForCrossCheck } from './audio/rhythm.js';
@@ -9,11 +9,8 @@ import { SyncSession, type SyncSnapshot } from './sync/syncSession.js';
 import { reduceDisplay, type DisplaySong } from './ui/displaySong.js';
 import { Stage } from './ui/Stage.js';
 
-/** Seconds of audio per recognition. Add ?clip=9 to the URL to compare lengths. */
+/** Seconds of audio per routine check while a song is on. Add ?clip=9 to the URL to compare lengths. */
 const CLIP_SECONDS = clipSecondsFromSearch(typeof window === 'undefined' ? '' : window.location.search);
-const SETTLE_MS = CLIP_SECONDS * 1000 + TRIGGER_CONFIG.settleMarginMs;
-/** Settle time for trigger checks, which send the shorter quick clip. */
-const QUICK_SETTLE_MS = Math.min(CLIP_SECONDS, CAPTURE_CONFIG.quickClipSeconds) * 1000 + TRIGGER_CONFIG.settleMarginMs;
 
 /** True when the error means the browser or the user blocked the mic. */
 export function isPermissionError(e: unknown): boolean {
@@ -94,11 +91,13 @@ export function App() {
   }, [snap]);
 
   // Learn the beat grid while a song is on screen; the tracker decides locally when the rhythm says it changed.
+  // Re-arm after a change search ends too: if it was the same song, the detectors learn it again.
   const displayKey = display && display.lostAt === null ? display.key : null;
+  const changeSuspected = Boolean(snap?.changeSuspected);
   useEffect(() => {
-    if (displayKey) recorder.current.armRhythm(displayKey);
-    else recorder.current.disarmRhythm();
-  }, [displayKey]);
+    if (displayKey && !changeSuspected) recorder.current.armRhythm(displayKey);
+    else if (!displayKey) recorder.current.disarmRhythm();
+  }, [displayKey, changeSuspected]);
 
   // BPM cross-check: the local tempo pulls a recognition forward when it says the playback rate moved.
   useEffect(() => {
@@ -142,17 +141,18 @@ export function App() {
       const rec = recorder.current;
       await rec.start();
       const s = new SyncSession({
-        getClip: (seconds) => rec.getClip(seconds ?? CLIP_SECONDS),
+        getClip: (seconds) => rec.getClip(seconds),
         bufferedSeconds: () => rec.bufferedSeconds(),
+        routineClipSeconds: CLIP_SECONDS,
         identify: (blob) => identify(blob),
         onChange: setSnap,
-        settleMs: SETTLE_MS,
       });
       session.current = s;
-      // Sound returning after a gap usually means a new track: check soon.
-      rec.onGapEnd = () => s.recheckSoon(QUICK_SETTLE_MS, true);
-      // A different rhythm for 3s straight: move on now, confirm with a check right away.
-      rec.onSongChange = () => s.suspectSongChange(RHYTHM_CONFIG.switchAfterMs);
+      // Local change detectors report where the new song may have started; the session then
+      // identifies only audio from that point (quick clip first, then long).
+      rec.onGapEnd = () => s.changeDetected(performance.now());
+      rec.onSongChange = () => s.changeDetected(performance.now() - TRIGGER_CONFIG.rhythmChangeLagMs);
+      rec.onSignatureChange = (at) => s.changeDetected(at);
       lastPosRef.current = null;
       setLastMissAt(null);
       setStartedAt(performance.now());
@@ -174,6 +174,17 @@ export function App() {
   const bufferedSeconds = useCallback(() => recorder.current.bufferedSeconds(), []);
   const getBeat = useCallback((nowMs: number) => recorder.current.beatFrame(nowMs), []);
   const getRhythm = useCallback(() => recorder.current.rhythmSnapshot(), []);
+  // ?debug=1 readout: how often each clip length matched, change search and sound signature.
+  const getDebugExtra = useCallback(() => {
+    const st = session.current?.snapshot;
+    const clips = st
+      ? Object.entries(st.clipStats)
+          .map(([sec, c]) => `${sec}s ${c.matched}/${c.sent}`)
+          .join(' · ') || '-'
+      : '-';
+    const sig = recorder.current.signatureSnapshot();
+    return [`clips matched ${clips}`, `change search ${st?.changeSuspected ? 'on' : 'off'} · sound ${sig?.state ?? '-'} ${sig ? sig.distance.toFixed(1) : ''}`];
+  }, []);
   const running = Boolean(snap?.running);
   useWakeLock(running);
 
@@ -194,6 +205,7 @@ export function App() {
         getPositionMs={getPositionMs}
         getBeat={getBeat}
         getRhythm={getRhythm}
+        getDebugExtra={getDebugExtra}
         lastPosRef={lastPosRef}
         concert={{ available: concertAvailable, on: concertOn, lastText: concertSnap?.running ? concertSnap.lastText : null }}
         demoMode={mode === 'mock'}

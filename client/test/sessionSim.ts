@@ -59,8 +59,10 @@ export interface SessionSimOptions {
    * short clips match less often). 0 means clip length does not matter.
    */
   shortClipMissPerSecond?: number;
-  /** Turn off growing clips while searching (to compare with fixed clips). */
+  /** Send fixed 5s clips for everything (the earlier behaviour, for comparison). */
   fixedClips?: boolean;
+  /** How long before the rhythm trigger fires the change really began, as the app reports it (ms). */
+  rhythmLagMs?: number;
 }
 
 export interface SessionSimResult {
@@ -154,13 +156,13 @@ export async function simulateSession(o: SessionSimOptions): Promise<SessionSimR
       if (i >= 0) timers.splice(i, 1);
     },
     // Like the mic: no clip until that much audio has been buffered since Listen.
-    getClip: (seconds?: number) => {
-      const sec = o.fixedClips ? Math.min(seconds ?? 5, 5) : (seconds ?? o.clipSeconds ?? 6);
+    getClip: (seconds: number) => {
+      const sec = seconds;
       return now < sec * 1000 ? null : { blob: new Blob([new Uint8Array(Math.round(sec * 1000))]), capturedAtMs: now };
     },
     identify,
-    settleMs: (o.clipSeconds ?? 6) * 1000 + 700,
-    bufferedSeconds: o.fixedClips ? undefined : () => Math.min(10, now / 1000),
+    bufferedSeconds: () => Math.min(12, now / 1000),
+    ...(o.fixedClips ? { quickClipSeconds: 5, longClipSeconds: 5, routineClipSeconds: 5 } : {}),
     scheduler: o.scheduler,
     ...o.deps,
   } as SyncSessionDeps);
@@ -228,7 +230,7 @@ export async function simulateSession(o: SessionSimOptions): Promise<SessionSimR
   };
   for (let t = 0; t <= o.durationMs; t += STEP) addTimer(sample, t);
   if (o.rhythmTriggerAfterMs != null) {
-    for (const s of o.switchAtMs) addTimer(() => session.suspectSongChange(3000), s + o.rhythmTriggerAfterMs - now);
+    for (const s of o.switchAtMs) addTimer(() => session.changeDetected(now - (o.rhythmLagMs ?? 4000)), s + o.rhythmTriggerAfterMs - now);
   }
 
   session.start();

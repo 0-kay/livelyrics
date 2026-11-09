@@ -46,7 +46,8 @@ describe('session benchmark', () => {
 
   it('sped-up DJ set without gaps: switches within seconds, never the wrong song', async () => {
     const { out, switches } = await runAll('DJ set, sped up 1.08x, early cuts', 'precise');
-    expect(switches.every((s) => s !== null && s < 10_000)).toBe(true);
+    // No gap and no local trigger here: only the routine 5-6s checks with 8s clips can catch it.
+    expect(switches.every((s) => s !== null && s < 12_000)).toBe(true);
     for (const r of out) {
       expect(r.wrongSongMs).toBe(0);
       expect(r.backwardMoves).toBe(0);
@@ -63,24 +64,31 @@ describe('session benchmark', () => {
     for (const r of out) expect(r.wrongSongMs).toBe(0);
   }, 60_000);
 
-  it('phone mic in a room: the first song is found without a long wait', async () => {
-    // Short clips miss far more often on a real mic (here +20% per second under 8s). Growing the
-    // clip after each miss keeps the first song quick; fixed short clips left half the sessions
-    // waiting over 15s ("move closer"), which is what a real phone test showed.
+  it('phone mic in a room: predictable first song, faster switches, fewer requests than short clips', async () => {
+    // Short clips miss far more often on a real mic (here +20% per second under 8s). Starting with
+    // a quick 4s try and then a full 8s clip gives a predictable first song (about 9s), and
+    // identifying only audio since a change point makes switches quicker than fixed 5s clips.
     const sc = SCENARIOS['phone mic in a room, short clips miss more']!;
-    const firsts: number[] = [];
-    const fixed: number[] = [];
-    for (let seed = 1; seed <= 10; seed++) {
+    const first: number[] = [];
+    const sw: number[] = [];
+    const swFixed: number[] = [];
+    let req = 0;
+    let reqFixed = 0;
+    for (let seed = 1; seed <= 12; seed++) {
       const base = { ...sc, ...MODELS.precise, shortClipMissPerSecond: 0.2, seed };
-      firsts.push((await simulateSession(base)).firstLyricsMs ?? Infinity);
-      fixed.push((await simulateSession({ ...base, fixedClips: true })).firstLyricsMs ?? Infinity);
+      const r = await simulateSession(base);
+      const f = await simulateSession({ ...base, fixedClips: true });
+      first.push(r.firstLyricsMs ?? Infinity);
+      sw.push(...r.switchLatencyMs.map((x) => x ?? Infinity));
+      swFixed.push(...f.switchLatencyMs.map((x) => x ?? Infinity));
+      req += r.requestsPerHour;
+      reqFixed += f.requestsPerHour;
     }
-    firsts.sort((a, b) => a - b);
-    fixed.sort((a, b) => a - b);
-    expect(Math.max(...firsts)).toBeLessThan(15_000);
-    expect(firsts[5]!).toBeLessThan(11_000);
-    expect(firsts[5]!).toBeLessThan(fixed[5]!);
-  }, 120_000);
+    const p90 = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length * 0.9)]!;
+    expect(Math.max(...first)).toBeLessThan(13_000);
+    expect(p90(sw)).toBeLessThan(p90(swFixed));
+    expect(req).toBeLessThan(reqFixed);
+  }, 180_000);
 
   it.skipIf(!process.env.BENCH_OUT)('writes the full report', async () => {
     const report: Record<string, unknown> = {};

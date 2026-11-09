@@ -10,7 +10,7 @@ import type { ClockAction } from './playbackClock.js';
 export type SyncState = 'searching' | 'confirming' | 'locked' | 'drifting';
 
 export type RecognitionOutcome =
-  | { matched: false }
+  | { matched: false; /** A miss on a short clip: does not count toward losing the song. */ weak?: boolean }
   | {
       matched: true;
       /** Provider score 0-100. */
@@ -61,7 +61,7 @@ export class RecognitionScheduler {
   }
 
   onResult(r: RecognitionOutcome): SchedulerDecision {
-    if (!r.matched) return this.onMiss();
+    if (!r.matched) return this.onMiss(r.weak === true);
     this.misses = 0;
 
     if (r.songChanged) {
@@ -104,8 +104,9 @@ export class RecognitionScheduler {
     return { state: this._state, nextDelayMs: this.delayFor(this._state), lostLock: false };
   }
 
-  private onMiss(): SchedulerDecision {
-    this.misses++;
+  /** weak: a miss on a short clip, which says little; it does not count toward losing the song. */
+  private onMiss(weak = false): SchedulerDecision {
+    if (!weak) this.misses++;
     this.streak = 0;
     if (this._state === 'searching') {
       return { state: 'searching', nextDelayMs: this.cfg.searchIntervalMs, lostLock: false };
